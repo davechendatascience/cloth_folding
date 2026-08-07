@@ -166,6 +166,14 @@ class IsaacGarmentCfg:
     non-monotone no matter what the policy does, so the spec's monotone
     convergence argument is undermined below the level the reward can reach.
     """
+    render_interval: Optional[int] = None
+    """Physics steps between renders. ``None`` = once per policy step.
+
+    Any image-free workload (J labelling, replay, reachability) should set this
+    high: the env otherwise renders three 480x640 cameras that those paths
+    never read. On GPU the sim runs at 62% compute with **0% memory-bandwidth**
+    utilisation -- the signature of launch-overhead-bound work, where deleting
+    whole render passes helps more than tuning the physics."""
     stiffness_scale: float = 1.0
     """Multiply K (and D by sqrt of it, preserving zeta).
 
@@ -211,7 +219,7 @@ class IsaacGarmentBackend:
         env_cfg.scene.num_envs = 1
         env_cfg.sim.device = cfg.device
         env_cfg.decimation = cfg.decimation
-        env_cfg.sim.render_interval = cfg.decimation
+        env_cfg.sim.render_interval = cfg.render_interval or cfg.decimation
 
         damping = MEASURED_CRITICAL_DAMPING if cfg.joint_damping is None else cfg.joint_damping
         for robot in (env_cfg.left_robot, env_cfg.right_robot):
