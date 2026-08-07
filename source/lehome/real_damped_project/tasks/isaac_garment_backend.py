@@ -353,12 +353,52 @@ class IsaacGarmentBackend:
     # --------------------------------------------------------------------- reward
 
     def check_point_positions_cm(self) -> torch.Tensor:
-        """Check-point particle positions in centimetres, as LeHome measures them."""
+        """Check-point particle positions in centimetres, as LeHome measures them.
+
+        Deliberately does **not** call ``GarmentObject.get_current_mesh_points()``.
+        That method unconditionally does::
+
+            import open3d as o3d
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(transformed_mesh_points)
+
+        building a 14746-point Open3D cloud that is then discarded whenever
+        ``visualize=False, save=False`` -- and it rigid-transforms all 14746
+        points when we need 6. Measured at **154 ms per call, 21.6% of every
+        environment step**.
+
+        Here we read the raw points once, index the 6 check-points, and
+        transform only those. Same numbers, none of the waste.
+        """
         import numpy as np
 
         obj = self.env.object
-        pts, *_ = obj.get_current_mesh_points()
-        cp = np.asarray(pts)[self.check_points] * 100.0
+        idx = self.check_points
+
+        try:
+            if getattr(obj, "_device", "cpu") == "cpu":
+                pts = obj._get_points_pose().detach().cpu().numpy()[idx]
+                pos, ori = obj.get_world_pose()
+                cp = obj.transform_points(
+                    pts,
+                    pos.detach().cpu().numpy(),
+                    ori.detach().cpu().numpy(),
+                    obj.get_world_scale().detach().cpu().numpy(),
+                )
+            else:
+                cp = (
+                    obj._cloth_prim_view.get_world_positions()
+                    .squeeze(0)[idx]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+        except Exception:
+            # Fall back to LeHome's own accessor if the internals shift.
+            pts, *_ = obj.get_current_mesh_points()
+            cp = np.asarray(pts)[idx]
+
+        cp = np.asarray(cp) * 100.0
         return torch.as_tensor(cp, dtype=torch.float32, device=self.device).unsqueeze(0)
 
     def compute_cloth_error(self) -> torch.Tensor:
