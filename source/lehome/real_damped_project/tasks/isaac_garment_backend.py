@@ -173,7 +173,29 @@ class IsaacGarmentCfg:
     high: the env otherwise renders three 480x640 cameras that those paths
     never read. On GPU the sim runs at 62% compute with **0% memory-bandwidth**
     utilisation -- the signature of launch-overhead-bound work, where deleting
-    whole render passes helps more than tuning the physics."""
+    whole render passes helps more than tuning the physics.
+
+    Superseded in practice by ``skip_images`` below -- setting this high hangs
+    the env; see that field."""
+    skip_images: bool = False
+    """Replace ``_get_observations`` with a proprio-only version.
+
+    This is the working form of what ``render_interval`` was reaching for.
+    Raising ``render_interval`` does **not** work: the sensors still exist and
+    Isaac Lab's step path waits on renders that never arrive. What removes the
+    cost is not creating the work -- launch with
+    ``AppLauncher(enable_cameras=False)`` *and* set this, so
+    ``_get_observations`` stops reading camera buffers.
+
+    Both halves are required. Disabling the renderer alone crashes with an
+    illegal GPU access inside the sensor buffer read, which corrupts the CUDA
+    context and then reports itself as a ``GpuParticleClothView`` failure --
+    a symptom that points at the cloth rather than at the cameras.
+
+    Measured (decimation 3, GPU, N=1): 348.7 -> 101.4 ms per step, **3.44x**.
+    At N=4: 700.2 -> 264.4 ms; 15.13 vs 2.87 env-steps/s end to end.
+    Safe for any workload that never reads images: J labelling, demo replay,
+    reachability checks."""
     stiffness_scale: float = 1.0
     """Multiply K (and D by sqrt of it, preserving zeta).
 
@@ -195,6 +217,36 @@ class IsaacGarmentCfg:
     space; see :meth:`IsaacGarmentBackend.get_proprioception`."""
 
     functional: GarmentFunctionalCfg = field(default_factory=GarmentFunctionalCfg)
+
+
+def _install_proprio_only_observations(env) -> None:
+    """Rebind ``_get_observations`` on a live env so it never touches cameras.
+
+    Bound to the instance rather than subclassed because the env comes from
+    ``gym.make`` on LeHome's registered id, so there is no class of ours to
+    override. ``DirectRLEnv.step`` calls ``self._get_observations()``, which
+    honours an instance attribute.
+
+    The base implementation reads three RGB buffers plus depth, copies four
+    tensors to host, and converts the depth map to uint16 -- every step, all
+    discarded by image-free workloads.
+    """
+    import types
+
+    def _proprio_only(self):
+        left = torch.cat(
+            [self.left_joint_pos[:, i].unsqueeze(1) for i in range(6)], dim=-1
+        )
+        right = torch.cat(
+            [self.right_joint_pos[:, i].unsqueeze(1) for i in range(6)], dim=-1
+        )
+        joint_pos = torch.cat([left, right], dim=1)
+        return {
+            "action": self.actions.detach().cpu().numpy(),
+            "observation.state": joint_pos.detach().cpu().numpy(),
+        }
+
+    env._get_observations = types.MethodType(_proprio_only, env)
 
 
 class IsaacGarmentBackend:
@@ -241,6 +293,8 @@ class IsaacGarmentBackend:
 
         # --- env -------------------------------------------------------------
         self.env = gym.make("LeHome-BiSO101-Direct-Garment-v2", cfg=env_cfg).unwrapped
+        if cfg.skip_images:
+            _install_proprio_only_observations(self.env)
         # Required before stepping; DirectRLEnv never calls it, and
         # GarmentObject.reset() raises AttributeError without it.
         self.env.initialize_obs()

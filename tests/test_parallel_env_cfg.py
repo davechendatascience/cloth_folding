@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from lehome.real_damped_project.tasks.parallel_garment_env import (
+    GARMENT_MESH_SUBPATH,
     GARMENT_SUBPATH,
     build_parallel_cfg,
 )
@@ -49,28 +50,44 @@ class FakeCfg:
 def test_robots_move_into_the_env_namespace():
     """The cloner only replicates prims under /World/envs/env_.*/."""
     cfg = build_parallel_cfg(FakeCfg(), num_envs=8)
-    assert cfg.left_robot.prim_path == "/World/envs/env_.*/Robot/Left_Robot"
-    assert cfg.right_robot.prim_path == "/World/envs/env_.*/Robot/Right_Robot"
+    # No intermediate "Robot/" level: Isaac Lab spawns the asset's leaf under
+    # each cloned env origin, so an extra directory makes it hunt for a parent
+    # prim that cloning never creates ("Unable to find source prim path").
+    assert cfg.left_robot.prim_path == "/World/envs/env_.*/Left_Robot"
+    assert cfg.right_robot.prim_path == "/World/envs/env_.*/Right_Robot"
 
 
 def test_cameras_follow_their_robots():
     """Wrist/top cameras are children of the arms, so they must move too."""
     cfg = build_parallel_cfg(FakeCfg(), num_envs=4)
     for path in (cfg.top_camera.prim_path, cfg.left_wrist.prim_path, cfg.right_wrist.prim_path):
-        assert path.startswith("/World/envs/env_.*/Robot/"), path
+        assert path.startswith("/World/envs/env_.*/"), path
+        assert "/Robot/" not in path, f"stale intermediate Robot level: {path}"
 
 
 def test_num_envs_and_spacing_are_applied():
     cfg = build_parallel_cfg(FakeCfg(), num_envs=16, env_spacing=2.5)
     assert cfg.scene.num_envs == 16
     assert cfg.scene.env_spacing == 2.5
-    assert cfg.scene.replicate_physics is True
+
+
+def test_replicate_physics_is_disabled():
+    """The one setting that decides whether N cloths actually simulate.
+
+    replicate_physics=True makes PhysX replicate env_0's physics rather than
+    parse each env, which covers articulations but not particle cloths: all N
+    Garment/mesh prims exist on the stage and the cloth view still reports
+    count=1. Nothing downstream can detect that -- the envs simply share a
+    garment -- so it is asserted here rather than left to the Isaac test.
+    """
+    cfg = build_parallel_cfg(FakeCfg(), num_envs=16)
+    assert cfg.scene.replicate_physics is False
 
 
 def test_rewrite_is_idempotent():
     """Applying it twice must not produce /World/envs/env_.*/Robot/envs/..."""
     cfg = build_parallel_cfg(build_parallel_cfg(FakeCfg(), 4), 4)
-    assert cfg.left_robot.prim_path == "/World/envs/env_.*/Robot/Left_Robot"
+    assert cfg.left_robot.prim_path == "/World/envs/env_.*/Left_Robot"
     assert cfg.left_robot.prim_path.count("envs") == 1
 
 
@@ -87,10 +104,15 @@ def test_batched_view_expression_matches_the_cloned_paths():
     """The ClothPrim regex must match what cloning actually produces."""
     import re
 
-    expr = f"/World/envs/env_.*/{GARMENT_SUBPATH}"
+    # GarmentObject builds a hierarchy: prim_path=".../Garment" puts the cloth
+    # at ".../Garment/mesh". Matching the parent finds no cloths and
+    # create_particle_cloth_view returns None.
+    expr = f"/World/envs/env_.*/{GARMENT_MESH_SUBPATH}"
     for i in (0, 1, 7, 63):
-        assert re.fullmatch(expr, f"/World/envs/env_{i}/{GARMENT_SUBPATH}"), i
-    # and must not match the pre-clone absolute path
+        assert re.fullmatch(expr, f"/World/envs/env_{i}/{GARMENT_MESH_SUBPATH}"), i
+    assert GARMENT_MESH_SUBPATH.endswith("/mesh"), "view must target the mesh prim"
+    # must not match the parent, nor the pre-clone absolute path
+    assert not re.fullmatch(expr, f"/World/envs/env_0/{GARMENT_SUBPATH}")
     assert not re.fullmatch(expr, f"/World/Object/{GARMENT_SUBPATH}")
 
 

@@ -38,6 +38,8 @@ p.add_argument("--cache", required=True, help="preprocess.py output dir")
 p.add_argument("--dataset", required=True, help="source LeRobot dir (garment_info.json)")
 p.add_argument("--garment", default="Top_Long_Seen_0")
 p.add_argument("--device", default="cpu")
+p.add_argument("--with_images", action="store_true",
+               help="render cameras (default off: labelling never reads them)")
 p.add_argument("--decimation", type=int, default=3)
 p.add_argument("--eps_per_garment", type=int, default=25)
 p.add_argument("--render_interval", type=int, default=0,
@@ -52,6 +54,8 @@ p.add_argument("--episode_min", type=int, default=0,
                     "the far end of the range while a first works up from the "
                     "start, without redoing each other's episodes.")
 p.add_argument("--episode_max", type=int, default=10**9, help="Restrict to episodes < this.")
+p.add_argument("--out_suffix", default=None,
+               help="override the J/J_done filename suffix. Used to re-label\n                    already-done episodes into a separate file for A/B checks\n                    without touching the real labels.")
 p.add_argument("--shard", type=int, default=0)
 p.add_argument("--num_shards", type=int, default=1,
                help="Split episodes across independent processes. One process "
@@ -63,7 +67,12 @@ args = p.parse_args()
 os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
 from isaaclab.app import AppLauncher  # noqa: E402
 
-launcher = AppLauncher(headless=True, enable_cameras=True, device=args.device)
+# Labelling replays recorded actions and reads particle positions -- it never
+# reads an image. Rendering three 640x480 cameras per step was 3.44x of the
+# per-step cost (348.7 -> 101.4 ms at N=1). --with_images restores the old
+# behaviour if a future variant of this script needs frames.
+launcher = AppLauncher(headless=True, enable_cameras=args.with_images,
+                       device=args.device)
 simulation_app = launcher.app
 
 EXIT = 0
@@ -80,7 +89,8 @@ try:
     n = len(action)
 
     # resume support -- a full pass is hours
-    sfx = "" if args.num_shards == 1 else f"_shard{args.shard}"
+    sfx = args.out_suffix if args.out_suffix is not None else (
+        "" if args.num_shards == 1 else f"_shard{args.shard}")
     jf_path, df_path = cache / f"J{sfx}.npy", cache / f"J_done{sfx}.npy"
     J = np.full(n, np.nan, dtype=np.float32)
     done = np.zeros(0, dtype=np.int64)
@@ -109,6 +119,7 @@ try:
     backend = IsaacGarmentBackend(
         IsaacGarmentCfg(garment_name=args.garment, device=args.device,
                         decimation=args.decimation, joint_damping={},
+                        skip_images=not args.with_images,
                         render_interval=args.render_interval or None)
     )
     print(f"[env] dt={backend.dt:.4f}s ({1/backend.dt:.1f} Hz), original damping")

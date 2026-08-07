@@ -65,6 +65,48 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def restrict_to_labelled(cache: str, train_eps, val_eps, seed: int = 0):
+    """Drop episodes whose J labels are missing.
+
+    Labelling is a separate multi-hour pass, so ``J.npy`` is routinely partial:
+    unlabelled frames are NaN. ``dJ`` inherits the NaN, ``exp(-dJ/beta)``
+    returns NaN, and the loss becomes NaN for every window drawn from an
+    unlabelled episode -- silently, and only when ``--beta``/``--lambda_j`` are
+    in use, which is exactly when the run matters.
+
+    Requires *every* frame of an episode to be finite rather than filtering
+    frame-wise: a window straddling the labelled/unlabelled boundary would
+    otherwise contribute a NaN in the middle of an otherwise valid sequence.
+
+    Re-splits the labelled pool rather than intersecting the existing split.
+    Filtering a split made over all 250 episodes would leave validation with
+    whatever fraction of its 25 happened to be labelled -- measured: 4 -- which
+    is too thin to judge a pre-registered pass criterion on. Re-splitting keeps
+    the intended val_frac of the data that actually exists.
+    """
+    cache_p = Path(cache)
+    J = np.load(cache_p / "J.npy")
+    ep = np.load(cache_p / "episode.npy")
+    ok = np.array(sorted(int(e) for e in np.unique(ep)
+                         if np.isfinite(J[ep == e]).all()))
+
+    n_before = len(train_eps) + len(val_eps)
+    frac = len(val_eps) / max(n_before, 1)
+    rng = np.random.RandomState(seed)
+    perm = rng.permutation(ok)
+    n_val = max(1, int(round(len(ok) * frac)))
+    va, tr = np.sort(perm[:n_val]), np.sort(perm[n_val:])
+
+    print(f"[data] J labels present for {len(ok)}/{n_before} episodes; "
+          f"re-split labelled pool -> train {len(tr)} / val {len(va)}")
+    if not len(tr) or not len(va):
+        raise SystemExit(
+            f"after requiring J labels: {len(tr)} train / {len(va)} val episodes. "
+            "Label more episodes before using --beta/--lambda_j."
+        )
+    return tr, va
+
+
 def trivial_baselines(cache: str, train_eps, val_eps, delta: bool = True) -> dict:
     """MSE of predictors that have learned nothing, on the validation episodes.
 
@@ -212,6 +254,9 @@ def main(argv=None):
         device = "cpu"
 
     train_eps, val_eps = split_episodes(args.cache, args.val_frac, args.seed)
+    if args.beta is not None or args.lambda_j > 0:
+        train_eps, val_eps = restrict_to_labelled(
+            args.cache, train_eps, val_eps, args.seed)
     delta = not args.absolute_target
     train_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=train_eps, delta_target=delta)
     val_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=val_eps, delta_target=delta)

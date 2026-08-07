@@ -58,7 +58,7 @@ Levers by link:
 
 | lever | status | effect | notes |
 |---|---|---|---|
-| **`num_envs` > 1** | **blocked** | potentially 10–60× | The single biggest lever and the reason the GPU is idle. LeHome authors every prim at an absolute path (`/World/Robot/...`, `/World/Object/...`), so Isaac Lab's cloner has nothing to replicate, and `SingleClothPrim`/`SingleParticleSystem` wrap exactly one prim. Needs scene re-authoring under `/World/envs/env_.*/` + a batched cloth view. See [Parallel envs](#parallel-envs). |
+| **`num_envs` > 1** | **works (2026-08-07)** | throughput scaling unmeasured | Verified at N=4: `(4, 14544, 3)`, all finite, centroid spacing 2.9915 m vs `env_spacing=3.0`. Needed four things: robot/camera paths under `/World/envs/env_.*/`, the garment created in `env_0` so cloning replicates it, a `ClothPrim` **view** aimed at `Garment/mesh`, and **`replicate_physics=False`** (the actual blocker). See [Parallel envs](#parallel-envs). **Not yet usable for training** — per-env garment pose reset is missing, see below. |
 | GPU vs CPU sim | **measured** | **2.1×** (82 → 39 s/episode) | Requires `PYTORCH_JIT=0` on GB10. Only 2× because the workload is 1 env × 14.7k particles — too small and too serial for a GPU. |
 | CPU sharding (no GPU job) | **measured** | ~4× at 4 shards | 6 shards thrashed the box (load 95, 109/121 GB). 4 is the safe ceiling; each Isaac instance is ~15 GB under load, not the 7 GB measured at startup. |
 | CPU shards **alongside** a GPU job | **measured → NO GAIN** | 1.49 vs 1.50 ep/min | Exactly a wash. The GPU labeller is not GPU-bound: it needs a CPU core to drive the Python step loop and marshal particle reads, so 3 CPU shards starve it by the same amount they contribute (GPU 1.50 → 0.51 ep/min; shards add 0.98). **A high idle-core count is not spare capacity if one of those cores is load-bearing for the accelerator job.** Reverted to GPU alone. |
@@ -151,9 +151,102 @@ replicate → fundamentally impossible) across two full env builds, because the
 probe swallowed the traceback into a one-line message. **Get the traceback
 before forming a hypothesis** — the answer was in the stack the whole time.
 
-**Remaining unknowns.** Whether one PhysX particle *system* can host N cloths or
-each env needs its own; and whether O(N) host-side particle reads per step
-become the new bottleneck, which would then justify a proper batched view.
+**`replicate_physics` must be False (2026-08-07).** This is the actual blocker,
+found after four failed builds. With `replicate_physics=True`, PhysX replicates
+env_0's physics structure instead of parsing each env's prims — which covers
+articulations and rigid bodies but *not* particle cloths. The signature is a
+stage where everything looks right and the physics disagrees:
+
+```
+/World/envs/env_{0..3}/Garment/mesh   EXISTS       (all four, IsInstanceable=False)
+cloth_view.count                       1           (PhysX parsed one cloth)
+particle_positions()                   (1, 14544, 3)
+```
+
+**Diagnosing this took five attempts, four of which were guesses made without
+looking at the stage.** In order: nested prim path → garment outside the env
+namespace → view aimed at the parent instead of `Garment/mesh` → `copy_from_source`
+inheritance (a good story, and wrong — the docstring says clones "mirror
+env_0's changes", which would explain a shared cloth perfectly, but a stage dump
+showed the prims were real and independent). One `is_prim_path_valid` loop plus
+`GetChildren()` would have separated "not cloned" from "cloned but not parsed"
+at attempt one, and every subsequent hypothesis was unnecessary.
+
+This is the **same lesson already recorded two sections above** for the
+multi-cloth work. Both times the cheap observation was available from the start
+and skipped in favour of a plausible mechanism. **When a symptom admits two
+categories of cause, measure which category first — do not pick one and start
+fixing.**
+
+**The static scene is global, so envs are not equivalent (2026-08-07).** This is
+the current blocker, and it was nearly missed. `garment_bi_v2._setup_scene`
+spawns the bedroom once:
+
+```python
+cfg.func("/World/Scene", cfg, translation=(0.0, 0.0, 0.0), ...)
+```
+
+`/World/Scene` sits outside `/World/envs/env_.*/`, so the cloner never
+replicates it. env_0's garment rests on the bedroom furniture; every other env
+is 3 m away with nothing beneath it. Measured settled centroid z after per-env
+posing: **env_0 = 0.5349, envs 1-3 = 0.2136 / 0.2121 / 0.2050.**
+
+Keeping the scene global was a deliberate choice in `build_parallel_cfg`
+("static shared geometry, replicating it would multiply cost for no benefit").
+That reasoning is right for rendering and wrong for physics: the garment *rests
+on* that geometry.
+
+**`test_per_env_pose.py` passed while this was true**, reporting "parallel envs
+are usable". It asked whether poses were *independent* and never whether envs
+were *interchangeable* — so N independent, correctly-posed, physically-unequal
+envs sailed through. The equivalence check (all envs must settle to the same
+height, spread < 0.05 m) now exists precisely because the earlier criteria
+could not fail on this.
+
+**Generalises past this bug:** for parallel envs, `distinct` and `equivalent`
+are two separate properties and both need asserting. The distinctness test was
+written to catch silent aliasing and did; it had nothing to say about silent
+divergence.
+
+**Options**, unresolved: spawn the bedroom under `/World/envs/env_0/Scene` so it
+clones (N copies of full bedroom geometry — expensive, and the env origins are a
+centred grid so the garment poses shift); or spawn only the support surface per
+env; or accept N=1 for demo-matched work and use parallel envs only where the
+furniture is irrelevant. Note `filter_collisions(global_prim_paths=["/World/Scene"])`
+assumes the global scene and must change with it.
+
+---
+
+**Per-env garment pose — solved (2026-08-07).** `set_garment_poses()` mirrors
+LeHome's identity → initial-points → target-pose sequence per env, using the
+batched view for particles and a `SingleXFormPrim` per env for the pose.
+Verified at N=4: inter-env xy offset error 0.0128 m; re-posing env 1 alone moved
+it 0.7353 m while envs 0/2/3 moved ≤ 0.0218 m.
+
+The problem it fixed, measured at N=4 before the method existed:
+
+| env | z |
+|---|---|
+| 0 | **0.5292** |
+| 1 | 0.2029 |
+| 2 | 0.1970 |
+| 3 | 0.2018 |
+
+Envs 1–3 agree to ~0.006 m — identical initial conditions, differing only by
+float nondeterminism, exactly as expected. **env_0 sits 0.33 m higher**, because
+LeHome's reset logic acts on `self.object`, the single `SingleClothPrim` that
+wraps env_0 alone. The clones are never posed.
+
+This is the parallel-env form of the bug that already cost us once: garment pose
+must be set per episode, or demo replay drops from 90% J reduction to 0.7%
+(§ "Correctness gotchas"). Until per-env pose reset exists, `num_envs > 1` gives
+N independent cloths that all start from the *wrong* configuration, which is
+worse than useless for labelling and for RL resets. **Do not train on this yet.**
+
+**Remaining unknowns.** Whether `replicate_physics=False` costs enough start-up
+time or memory at large N to cap `num_envs` below the useful range; how
+throughput actually scales with N (the 10–60× estimate is still unmeasured);
+and whether O(N) host-side particle reads per step become the new bottleneck.
 
 **Why it is worth it.** It is the only lever that fixes the GPU utilisation
 problem at its root (62% compute / 0% memory bandwidth = not enough parallel
