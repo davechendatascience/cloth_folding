@@ -51,12 +51,22 @@ Random-pose control: **0.7%**. So the env reproduces the demonstrations, `J = 0`
 is attainable, and critical damping does not prevent folding. This is exactly
 what the mock failed (oracle best 1.51 against a 0.02 threshold).
 
-**At scale the success rate is 39%, not the 2/3 this three-episode sample
-suggests.** Over 85 labelled episodes, replay reaches `J = 0` in 33 (median best
-`J` 0.407). Reachability is still demonstrated — 33 episodes genuinely fold —
-but "the demonstrations succeed" is a weaker claim than the small sample implied,
-and it is consistent with a largely open-loop script that works when the garment
-starts favourably.
+**At scale the success rate is 27%, not the 2/3 this three-episode sample
+suggests.** The figure fell every time the sample grew:
+
+| episodes labelled | replay reaches `J = 0` |
+|---|---|
+| 3 | 67% |
+| 85 | 39% |
+| **150** | **27%** (41/150, median best `J` 0.656) |
+
+Reachability is still demonstrated — 41 episodes genuinely fold, and `J = 0` is
+attainable with critical damping — but "the demonstrations succeed" is a much
+weaker claim than the three-episode table implied. It is consistent with a
+largely open-loop script that works when the garment happens to start
+favourably, which is exactly what the stereotypy measurement below shows.
+
+**Treat the three-episode row above as an illustration, not a result.**
 
 Two protocol requirements, both load-bearing: `meta/garment_info.json` gives a
 per-episode `object_initial_pose`, and `reset()` randomises placement — replay
