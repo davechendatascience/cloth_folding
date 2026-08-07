@@ -179,6 +179,35 @@ J_true = fn(true).numpy()
 
 d_pred, d_true = pdists(pred), pdists(true)
 
+# --- MANDATORY CONTROL: how much is predictable from episode phase alone? --
+# J falls over an episode in a stereotyped way, so a model can score a high R^2
+# by reading the clock rather than the cloth. Measured on the scalar J head:
+# vision R^2 0.863 vs phase-only R^2 0.810 -- vision added 0.053, and stratified
+# R^2 was NEGATIVE in every band, i.e. classification with no resolving power.
+# Any position R^2 below is meaningless without this comparison.
+from lehome.real_damped_project.data.dataset import phase_of_frames  # noqa: E402
+
+ph_all = phase_of_frames(episode)
+G = 100
+grid = np.linspace(0, 1, G)
+tr_curves = []
+for e in sorted(train_eps):
+    i = np.where((episode == e) & ok)[0]
+    if len(i) > 4:
+        tr_curves.append(np.stack([np.interp(grid, ph_all[i], CP[i, k, d])
+                                   for k in range(P) for d in range(3)], axis=-1))
+phase_curve = np.mean(tr_curves, axis=0) if tr_curves else None
+
+ph_pred = torch.tensor(np.stack([
+    np.interp(ph_all[va_idx], grid, phase_curve[:, c]) for c in range(P * 3)
+], axis=-1).reshape(-1, P, 3), dtype=torch.float32)
+ph_true = torch.tensor(CP[va_idx], dtype=torch.float32)
+
+print("\n=== CONTROL: phase alone (no image) ===")
+print(f"  J(p_phase) vs J(p)       R2 = {r2(torch.tensor(fn(ph_pred).numpy()), torch.tensor(fn(ph_true).numpy())):>7.4f}")
+print(f"  pairwise distances       R2 = {r2(pdists(ph_pred), pdists(ph_true)):>7.4f}")
+print(f"  per-point positions      R2 = {r2(ph_pred, ph_true):>7.4f}")
+
 print("\n=== vision -> cloth configuration (held-out episodes) ===")
 print(f"  1. J(p_hat) vs J(p)      R2 = {r2(torch.tensor(J_pred), torch.tensor(J_true)):>7.4f}"
       f"   corr = {np.corrcoef(J_pred, J_true)[0,1]:.4f}")
@@ -189,10 +218,29 @@ print(f"  3. per-point positions   R2 = {r2(pred, true):>7.4f}"
 
 j_r2 = r2(torch.tensor(J_pred), torch.tensor(J_true))
 d_r2 = r2(d_pred, d_true)
+ph_d_r2 = r2(pdists(ph_pred), pdists(ph_true))
+gain = d_r2 - ph_d_r2
+print(f"\n  vision gain over phase on pairwise distances: {gain:+.4f}")
+
+# Granularity: within a narrow band of true J, does the model still resolve?
+# Negative R^2 here means classification, not regression -- fatal for a
+# controller, which needs dJ/dp to point somewhere useful near the goal.
+print("\n=== granularity: R2 on distances, stratified by true J ===")
+Jt = fn(true).numpy()
+for lo, hi in [(0, 1), (1, 3), (3, 5), (5, 8)]:
+    sel = (Jt >= lo) & (Jt < hi)
+    if sel.sum() > 50:
+        print(f"  J in [{lo},{hi}): n={int(sel.sum()):>5}  "
+              f"R2={r2(d_pred[sel], d_true[sel]):>7.4f}")
 print("\n=== verdict ===")
-if j_r2 >= 0.7 and d_r2 >= 0.6:
+if j_r2 >= 0.7 and d_r2 >= 0.6 and gain >= 0.15:
     print("  Vision recovers the configuration well enough to drive the controller.")
     print("  The factored design is buildable; next unknown is the cloth Jacobian.")
+elif gain < 0.05:
+    print("  Vision adds nothing over episode phase -- it is reading the clock,")
+    print("  not the cloth. The attention is not localising check-points, so no")
+    print("  controller can be built on this perception. THIS IS THE FAILURE MODE")
+    print("  that made the scalar J head look like it worked (R2 0.863 vs 0.810).")
 elif j_r2 >= 0.5:
     print("  Partial. J is recoverable through positions but the relative geometry")
     print("  is loose -- the descent direction dJ/dp would be noisy. Consider more")
