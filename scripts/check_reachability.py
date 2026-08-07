@@ -41,6 +41,11 @@ p.add_argument("--device", default="cpu")
 p.add_argument("--episodes", type=int, default=3)
 p.add_argument("--decimation", type=int, default=3, help="3 -> 30Hz, matching demo fps")
 p.add_argument("--out", default=None, help="write a JSON verdict here")
+p.add_argument("--dataset", default=None,
+               help="source LeRobot dataset dir, for meta/garment_info.json "
+                    "(episode-specific garment poses). Without it the garment "
+                    "is randomly placed and a replay is meaningless.")
+p.add_argument("--eps_per_garment", type=int, default=25)
 args = p.parse_args()
 
 os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
@@ -63,6 +68,22 @@ try:
     eps = np.unique(episode)[: args.episodes]
     print(f"[data] replaying episodes {eps.tolist()} from {cache.name}")
 
+    # Episode-specific garment placement. The merged dataset concatenates
+    # per-garment sets, so global episode e maps to garment e//eps_per_garment
+    # at local index e%eps_per_garment. That layout is an assumption -- if it
+    # is wrong, J will not fall and the run reports the same failure as a true
+    # infidelity, so the two are distinguished by testing the matched pose
+    # against the random-pose control below.
+    ginfo, gnames = None, []
+    if args.dataset:
+        ginfo = json.loads((Path(args.dataset) / "meta" / "garment_info.json").read_text())
+        gnames = list(ginfo.keys())
+        print(f"[data] garment_info: {len(gnames)} garments x "
+              f"{args.eps_per_garment} episodes")
+    else:
+        print("[warn] no --dataset: garment pose will be RANDOM, so a replay "
+              "cannot test fidelity (control condition only)")
+
     backend = IsaacGarmentBackend(
         IsaacGarmentCfg(garment_name=args.garment, device=args.device,
                         decimation=args.decimation)
@@ -74,6 +95,16 @@ try:
     for e in eps:
         acts = action[episode == e]
         backend.reset_env_ids(torch.zeros(1, dtype=torch.long))
+        pose = None
+        if ginfo is not None:
+            gi, li = int(e) // args.eps_per_garment, int(e) % args.eps_per_garment
+            if gi < len(gnames) and str(li) in ginfo[gnames[gi]]:
+                pose = ginfo[gnames[gi]][str(li)]["object_initial_pose"]
+                backend.set_garment_pose(pose)
+                for _ in range(5):      # let the cloth settle at the new pose
+                    backend.simulate()
+                print(f"  ep{int(e):>3} garment={gnames[gi]} local={li} "
+                      f"pose={[round(x,3) for x in pose]}", flush=True)
         js = []
         for a in acts:
             backend.set_joint_targets(torch.as_tensor(a, dtype=torch.float32))

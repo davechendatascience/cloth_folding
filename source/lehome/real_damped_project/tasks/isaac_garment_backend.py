@@ -322,6 +322,24 @@ class IsaacGarmentBackend:
             for k, jid in enumerate(self.arm_joint_ids):
                 self._joint_targets[:, base + jid] = q_des[:, k]
 
+    def set_garment_pose(self, pose6) -> None:
+        """Place the garment at a specific pose: ``[x, y, z, rx, ry, rz]``.
+
+        Position in metres, rotation in Euler **degrees** -- the format
+        ``meta/garment_info.json`` records per demonstration episode.
+
+        Needed because ``reset()`` randomises the garment placement, so
+        replaying a demonstration's joint trajectory against a fresh reset
+        drives the arms through a motion calibrated for a garment that is no
+        longer there. Measured: a faithful replay against a random pose reduced
+        J by 0.7%, which looks exactly like the environment failing to
+        reproduce the demonstrations, and is not.
+        """
+        pose = [float(x) for x in pose6]
+        if len(pose) != 6:
+            raise ValueError(f"pose6 must be [x,y,z,rx,ry,rz], got {len(pose)} values")
+        self.env.set_all_pose({"Garment": pose})
+
     def set_joint_targets(self, q_des: torch.Tensor) -> None:
         """Command 12-D joint position targets directly, bypassing IK.
 
