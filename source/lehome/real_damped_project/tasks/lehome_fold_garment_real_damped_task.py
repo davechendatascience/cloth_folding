@@ -103,9 +103,19 @@ class LeHomeFoldGarmentRealDampedEnv:
     def _build_backend(cfg: Any, device: torch.device) -> LeHomeBackend:
         if getattr(cfg, "use_mock_backend", True):
             return MockFoldGarmentBackend(cfg.backend, device=device)
-        from .backend import IsaacLeHomeBackend
 
-        return IsaacLeHomeBackend(cfg.backend)
+        # The real adapter, verified 8/8 on closed-loop Cartesian accuracy.
+        # (An earlier `IsaacLeHomeBackend` stub was written against the API the
+        # spec *assumed* LeHome had; that API does not exist, so it is dead.)
+        from .isaac_garment_backend import IsaacGarmentBackend, IsaacGarmentCfg
+
+        backend_cfg = cfg.backend
+        if not isinstance(backend_cfg, IsaacGarmentCfg):
+            raise TypeError(
+                "use_mock_backend=False requires cfg.backend to be an "
+                f"IsaacGarmentCfg, got {type(backend_cfg).__name__}"
+            )
+        return IsaacGarmentBackend(backend_cfg)
 
     # ------------------------------------------------------------------ spaces
 
@@ -146,6 +156,16 @@ class LeHomeFoldGarmentRealDampedEnv:
             raise ValueError(
                 f"actions must be ({self.num_envs}, {self.action_dim}), got {tuple(actions.shape)}"
             )
+        if self.action_mode == "joint":
+            # Absolute joint position targets, in radians, as the
+            # demonstrations provide them. No [-1,1] normalisation: these are
+            # physical angles, and squashing them would make a BC-initialised
+            # policy's outputs meaningless. The backend clamps to the soft
+            # joint limits.
+            self.backend.set_joint_targets(actions)
+            self._pending_action = actions
+            return
+
         actions = actions.clamp(-1.0, 1.0)  # policy output is normalised
 
         # Normalised action -> metres, then through the clipped/filtered integrator.
