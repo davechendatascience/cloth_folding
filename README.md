@@ -51,8 +51,9 @@ Random-pose control: **0.7%**. So the env reproduces the demonstrations, `J = 0`
 is attainable, and critical damping does not prevent folding. This is exactly
 what the mock failed (oracle best 1.51 against a 0.02 threshold).
 
-**At scale the success rate is 27%, not the 2/3 this three-episode sample
-suggests.** The figure fell every time the sample grew:
+**Replay reproduces the fold in 27% of episodes — and that is a statement about
+our replay, not about the demonstrations.** The figure fell every time the
+sample grew:
 
 | episodes labelled | replay reaches `J = 0` |
 |---|---|
@@ -60,11 +61,16 @@ suggests.** The figure fell every time the sample grew:
 | 85 | 39% |
 | **150** | **27%** (41/150, median best `J` 0.656) |
 
-Reachability is still demonstrated — 41 episodes genuinely fold, and `J = 0` is
-attainable with critical damping — but "the demonstrations succeed" is a much
-weaker claim than the three-episode table implied. It is consistent with a
-largely open-loop script that works when the garment happens to start
-favourably, which is exactly what the stereotypy measurement below shows.
+**Do not read this as "73% of demonstrations fail."** The dataset carries no
+per-episode success annotation, and a released challenge dataset is very likely
+curated to successful folds. What we measure is whether *our* replay reproduces
+the fold, and replay is chaotic: two **identical** replays of episode 0 gave
+final `J` of 1.770, 1.062 and 2.214. An episode that genuinely folded can land
+anywhere depending on nondeterminism, so 27% is best read as a **replay-fidelity
+figure**.
+
+That distinction matters for the J labels: for the ~73% that do not reach 0, the
+label describes what our simulator did, not what the demonstrator achieved.
 
 **Treat the three-episode row above as an illustration, not a result.**
 
