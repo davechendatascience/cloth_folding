@@ -37,6 +37,9 @@ def main() -> int:
     p.add_argument("--episode_steps", type=int, default=300)
     p.add_argument("--steps_per_eval", type=int, default=64)
     p.add_argument("--patience", type=int, default=25)
+    p.add_argument("--min_capture", type=float, default=0.20,
+                   help="Fraction of the frozen->success range BC must capture. "
+                        "A bare 'beats frozen' passed at 2.8%%, which is noise.")
     args = p.parse_args()
 
     ev = json.loads(Path(args.eval).read_text())
@@ -52,15 +55,28 @@ def main() -> int:
     frozen_j = baselines.get("frozen")
     print(f"measured: bc J_min={bc_j:.4f}  baselines={ {k: round(v,4) for k,v in baselines.items()} }")
 
-    if frozen_j is not None and bc_j >= frozen_j:
-        print(
-            f"\nREFUSING: BC (J_min={bc_j:.4f}) does not beat frozen "
-            f"({frozen_j:.4f}). Finetuning would refine a policy that does "
-            f"nothing. Get more data (the other three garment types take the "
-            f"set from 83k to 265k frames) before spending RL compute.",
-            file=sys.stderr,
-        )
-        return 3
+    # A bare "beats frozen" is not enough. Measured 2026-08-07: BC scored
+    # J_min=7.151 against frozen 7.360 -- a 2.8% edge on a metric that must
+    # travel from ~7.5 to 0. That passes an inequality test while being
+    # indistinguishable from doing nothing, so require a share of the
+    # *achievable* range instead.
+    if frozen_j is not None:
+        achievable = frozen_j - 0.0          # success threshold is J == 0
+        captured = (frozen_j - bc_j) / max(achievable, 1e-9)
+        print(f"captured {captured*100:.1f}% of the achievable reduction "
+              f"(frozen {frozen_j:.3f} -> J=0), need >= {args.min_capture*100:.0f}%")
+        if captured < args.min_capture:
+            print(
+                f"\nREFUSING: BC captures only {captured*100:.1f}% of the range "
+                f"between frozen ({frozen_j:.4f}) and success (0.0). Finetuning "
+                f"refines a policy that is doing essentially nothing.\n"
+                f"Diagnosis to check first: measure image-vs-proprio attribution. "
+                f"If the policy ignores the cameras, the BC target is the problem "
+                f"-- predicting absolute joint targets lets proprio shortcut the "
+                f"loss, since a[t] ~ s[t]. Predict the delta a[t]-s[t] instead.",
+                file=sys.stderr,
+            )
+            return 3
 
     reach = bool(rc.get("reachability_verified", False))
 
