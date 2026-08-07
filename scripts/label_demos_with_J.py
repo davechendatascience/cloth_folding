@@ -40,8 +40,12 @@ p.add_argument("--garment", default="Top_Long_Seen_0")
 p.add_argument("--device", default="cpu")
 p.add_argument("--decimation", type=int, default=3)
 p.add_argument("--eps_per_garment", type=int, default=25)
-p.add_argument("--render_interval", type=int, default=100000,
-               help="Labelling never reads images; do not render.")
+p.add_argument("--render_interval", type=int, default=0,
+               help="0 = render once per policy step (the working default). "
+                    "Do NOT set this very high: the TiledCameras still exist "
+                    "and Isaac Lab's step path waits on renders that never "
+                    "arrive. Measured at 100000: 3 minutes, 0 episodes, GPU at "
+                    "0%%, plus a stray zenity dialog. Moderate values untested.")
 p.add_argument("--max_episodes", type=int, default=0, help="0 = all")
 p.add_argument("--shard", type=int, default=0)
 p.add_argument("--num_shards", type=int, default=1,
@@ -99,7 +103,7 @@ try:
     backend = IsaacGarmentBackend(
         IsaacGarmentCfg(garment_name=args.garment, device=args.device,
                         decimation=args.decimation, joint_damping={},
-                        render_interval=args.render_interval)
+                        render_interval=args.render_interval or None)
     )
     print(f"[env] dt={backend.dt:.4f}s ({1/backend.dt:.1f} Hz), original damping")
 
