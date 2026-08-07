@@ -45,6 +45,7 @@ class LeHomeDemoDataset(Dataset):
         seq_len: int = 16,
         normalize_proprio: bool = True,
         episodes: Optional[np.ndarray] = None,
+        delta_target: bool = True,
     ) -> None:
         cache_dir = Path(cache_dir)
         meta = json.loads((cache_dir / "meta.json").read_text())
@@ -60,6 +61,36 @@ class LeHomeDemoDataset(Dataset):
         self.state = np.load(cache_dir / "state.npy")
         self.action = np.load(cache_dir / "action.npy")
         self.episode = np.load(cache_dir / "episode.npy")
+
+        # --- delta target -------------------------------------------------
+        # Predicting the absolute joint target a[t] is what broke the first
+        # attempt. Because a[t] ~ s[t] at 30 fps, proprioception predicts the
+        # label through a near-identity map and captures nearly all of the
+        # loss; the cameras are needed only for the residual, so the gradient
+        # never pressures the visual encoder. Measured consequence: image
+        # influence / proprio influence = 0.11, and the policy did not move.
+        #
+        # With the target a[t] - s[t], proprioception cannot produce the label
+        # and persistence (a[t] = a[t-1]) stops being a competitive predictor,
+        # so *where the cloth is* becomes the only remaining signal.
+        self.delta_target = bool(delta_target)
+        self.target = (self.action - self.state) if self.delta_target else self.action
+
+        # --- Lyapunov labels (optional) -----------------------------------
+        # J(x_t) per frame, produced by replaying demonstrations in the
+        # simulator (scripts/label_demos_with_J.py). Absent until that pass has
+        # been run; the trainer falls back to unweighted BC.
+        self.J = None
+        self.dJ = None
+        jf = cache_dir / "J.npy"
+        if jf.exists():
+            self.J = np.load(jf).astype(np.float32)
+            dJ = np.zeros_like(self.J)
+            dJ[:-1] = self.J[1:] - self.J[:-1]
+            # dJ is undefined across an episode boundary -- the cloth teleports.
+            dJ[np.asarray(self.episode[:-1] != self.episode[1:]).nonzero()[0]] = 0.0
+            dJ[-1] = 0.0
+            self.dJ = dJ
 
         # Per-dimension statistics over the *training* frames only.
         self.normalize_proprio = normalize_proprio
@@ -92,6 +123,10 @@ class LeHomeDemoDataset(Dataset):
     def action_dim(self) -> int:
         return int(self.action.shape[1])
 
+    @property
+    def has_lyapunov_labels(self) -> bool:
+        return self.J is not None
+
     def __getitem__(self, i: int):
         s = int(self.starts[i])
         e = s + self.seq_len
@@ -99,11 +134,16 @@ class LeHomeDemoDataset(Dataset):
         p = self.state[s:e]
         if self.normalize_proprio:
             p = (p - self.state_mean) / self.state_std
-        return (
-            img,
-            torch.from_numpy(np.ascontiguousarray(p, dtype=np.float32)),
-            torch.from_numpy(np.ascontiguousarray(self.action[s:e], dtype=np.float32)),
-        )
+
+        t = torch.from_numpy(np.ascontiguousarray(self.target[s:e], dtype=np.float32))
+        out = [img, torch.from_numpy(np.ascontiguousarray(p, dtype=np.float32)), t]
+        if self.J is not None:
+            out.append(torch.from_numpy(np.ascontiguousarray(self.J[s:e], dtype=np.float32)))
+            out.append(torch.from_numpy(np.ascontiguousarray(self.dJ[s:e], dtype=np.float32)))
+        else:
+            z = torch.zeros(self.seq_len, dtype=torch.float32)
+            out.extend([z, z])
+        return tuple(out)
 
 
 def split_episodes(cache_dir: str, val_frac: float = 0.1, seed: int = 0):

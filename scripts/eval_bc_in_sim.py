@@ -63,6 +63,12 @@ try:
     state_mean = torch.as_tensor(ckpt["state_mean"], device=args.policy_device)
     state_std = torch.as_tensor(ckpt["state_std"], device=args.policy_device)
     cargs = ckpt["args"]
+    # A delta-target policy emits a[t]-s[t]; the env wants absolute joint
+    # targets. Forgetting to add s[t] back would command near-zero joint
+    # angles -- the arm would fold to its zero pose and the result would look
+    # like a policy failure rather than a units error.
+    delta_policy = bool(ckpt.get("delta_target", False))
+    print(f"[ckpt] target = {'a[t]-s[t] (delta)' if delta_policy else 'a[t] (absolute)'}")
     print(f"[ckpt] epoch={ckpt['epoch']} val_mse={ckpt['val_mse']:.5f}")
 
     cfg = IsaacGarmentCfg(
@@ -98,6 +104,8 @@ try:
                 prop = (backend.get_proprioception().to(args.policy_device) - state_mean) / state_std
                 mean, _, h, _ = policy(img, prop, h)
                 act = mean.to(backend.device)
+                if delta_policy:
+                    act = act + backend.get_proprioception()
             elif mode == "frozen":
                 act = q0.clone()
             else:  # random walk around the start pose

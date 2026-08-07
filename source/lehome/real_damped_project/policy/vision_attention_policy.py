@@ -122,6 +122,7 @@ class VisionAttentionPolicy(nn.Module):
         init_log_std: float = -1.0,
         spectral_norm: bool = False,
         squash: bool = True,
+        predict_j: bool = False,
     ) -> None:
         super().__init__()
         self.image_channels = image_channels
@@ -141,6 +142,18 @@ class VisionAttentionPolicy(nn.Module):
         self.policy_head = _maybe_sn(nn.Linear(hidden_dim, action_dim), spectral_norm)
         self.value_head = _maybe_sn(nn.Linear(hidden_dim, 1), spectral_norm)
         self.log_std = nn.Parameter(torch.full((action_dim,), float(init_log_std)))
+
+        # Auxiliary head predicting the cloth error J from the *visual* context
+        # alone. Deliberately fed z (post-attention image features) and not the
+        # GRU state or proprioception: if it could see joint angles it would
+        # learn a shortcut and teach the encoder nothing.
+        #
+        # This is the mechanism that forces camera -> deformable topology. To
+        # predict J the encoder must represent check-point geometry, and the
+        # spatial attention must ground on the cloth regions that determine it.
+        # Measured need: without it, image influence / proprio influence was
+        # 0.11 -- the policy ignored the cameras entirely.
+        self.j_head = nn.Linear(feature_dim, 1) if predict_j else None
 
         self.apply(self._init_weights)
         # Small final-layer gain: start near zero-action, so the first rollouts
@@ -207,7 +220,8 @@ class VisionAttentionPolicy(nn.Module):
         proprio: torch.Tensor,
         hidden_state: Optional[torch.Tensor] = None,
         dones: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return_j: bool = False,
+    ):
         """Whole-sequence rollout for BPTT during PPO updates.
 
         Args:
@@ -245,6 +259,12 @@ class VisionAttentionPolicy(nn.Module):
         flat = out.reshape(t * b, -1)
         mean = self.policy_head(flat).view(t, b, -1)
         value = self.value_head(flat).view(t, b)
+        if return_j:
+            if self.j_head is None:
+                raise RuntimeError("policy was built with predict_j=False")
+            # From the visual context only -- see j_head's construction.
+            j_pred = self.j_head(z.reshape(t * b, -1)).view(t, b)
+            return mean, value, h, j_pred
         return mean, value, h
 
     # ------------------------------------------------------------- distributions

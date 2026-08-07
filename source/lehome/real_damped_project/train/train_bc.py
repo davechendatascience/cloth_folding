@@ -52,10 +52,20 @@ def parse_args(argv=None):
     p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--limit_batches", type=int, default=0, help="smoke-test cap per epoch")
+    p.add_argument("--absolute_target", action="store_true",
+                   help="Predict a[t] instead of a[t]-s[t]. This is what the first "
+                        "run did, and it let proprio shortcut the loss (image "
+                        "attribution 0.11). Kept only for reproducing that result.")
+    p.add_argument("--beta", type=float, default=None,
+                   help="Lyapunov weighting temperature: w=exp(-dJ/beta). Requires "
+                        "J.npy in the cache. None = unweighted BC.")
+    p.add_argument("--lambda_j", type=float, default=0.0,
+                   help="Weight on the auxiliary predict-J-from-vision loss, which "
+                        "is what forces camera -> deformable topology grounding.")
     return p.parse_args(argv)
 
 
-def trivial_baselines(cache: str, train_eps, val_eps) -> dict:
+def trivial_baselines(cache: str, train_eps, val_eps, delta: bool = True) -> dict:
     """MSE of predictors that have learned nothing, on the validation episodes.
 
     Reporting raw MSE is misleading here. At 30 fps consecutive joint targets
@@ -85,6 +95,24 @@ def trivial_baselines(cache: str, train_eps, val_eps) -> dict:
         if e[i] != e[i - 1]:
             persist[i] = s[i]
 
+    # The yardstick must match the target the network is trained on, or the
+    # ratio is meaningless. With the delta target a[t]-s[t], "do nothing" is
+    # the zero vector rather than s[t], and persistence means repeating the
+    # previous *delta*.
+    if delta:
+        tgt = a - s
+        prev = np.zeros_like(tgt)
+        prev[1:] = tgt[:-1]
+        prev[np.asarray(e[:-1] != e[1:]).nonzero()[0] + 1] = 0.0
+        mse = lambda p: float(((tgt - p) ** 2).mean())  # noqa: E731
+        train_mask = np.isin(ep, train_eps)
+        const = np.repeat((ac[train_mask] - st[train_mask]).mean(0)[None], len(a), 0)
+        return {
+            "constant": mse(const),
+            "zero (do nothing)": mse(np.zeros_like(tgt)),
+            "persistence": mse(prev),
+        }
+
     mse = lambda p: float(((a - p) ** 2).mean())  # noqa: E731
     const = np.repeat(ac[np.isin(ep, train_eps)].mean(0)[None], len(a), 0)
     return {
@@ -94,38 +122,83 @@ def trivial_baselines(cache: str, train_eps, val_eps) -> dict:
     }
 
 
-def run_epoch(policy, loader, device, optimizer=None, max_grad_norm=1.0, limit=0):
+def lyapunov_weights(dJ: torch.Tensor, beta: float, clip: float = 5.0) -> torch.Tensor:
+    """Advantage-style weights that prefer demonstration transitions descending J.
+
+        w(dJ) = exp(-dJ / beta),  normalised to mean 1
+
+    This is the imitation-stage counterpart of the reward's ``r_mono`` term
+    (Sec. 2.3): both express *prefer J-descent*, once as a weight on which
+    transitions to copy and once as a reward. It is also AWR, which the spec
+    names in Sec. 3.4 alongside PPO.
+
+    Why it matters here: a demonstrator's trajectory is not uniformly good.
+    Segments where J rose are the operator's own wobbles and corrections --
+    exactly the non-monotone behaviour the whole design exists to suppress.
+    Unweighted BC copies those as faithfully as the productive segments.
+
+    Normalising to mean 1 keeps the loss scale independent of beta, so beta
+    changes *which* transitions dominate without also changing the effective
+    learning rate.
+    """
+    w = torch.exp((-dJ / beta).clamp(-clip, clip))
+    return w / w.mean().clamp_min(1e-8)
+
+
+def run_epoch(policy, loader, device, optimizer=None, max_grad_norm=1.0, limit=0,
+              beta=None, lambda_j=0.0):
     train = optimizer is not None
     policy.train(train)
-    tot_nll = tot_mse = tot_n = 0.0
-    for bi, (img, prop, act) in enumerate(loader):
+    tot_nll = tot_mse = tot_j = tot_n = 0.0
+    for bi, batch in enumerate(loader):
         if limit and bi >= limit:
             break
+        img, prop, act, J, dJ = batch
         # (B,T,...) -> (T,B,...) : the policy's sequence convention
         img = img.to(device, non_blocking=True).transpose(0, 1)
         prop = prop.to(device, non_blocking=True).transpose(0, 1)
         act = act.to(device, non_blocking=True).transpose(0, 1)
+        J = J.to(device, non_blocking=True).transpose(0, 1)
+        dJ = dJ.to(device, non_blocking=True).transpose(0, 1)
 
+        want_j = lambda_j > 0.0 and policy.j_head is not None
         with torch.set_grad_enabled(train):
-            mean, _, _ = policy.forward_sequence(img, prop)
+            if want_j:
+                mean, _, _, j_pred = policy.forward_sequence(img, prop, return_j=True)
+            else:
+                mean, _, _ = policy.forward_sequence(img, prop)
+                j_pred = None
             dist = policy.distribution(mean)
-            # BC targets are raw joint targets; with squashing the network's
-            # bounded output cannot represent them, so BC trains the
-            # pre-squash mean directly against the demonstrated action.
-            nll = -dist.log_prob(act).sum(-1).mean()
+            # Targets are unbounded (joint deltas), so BC trains the pre-squash
+            # mean directly; squashing would make them unrepresentable.
+            logp = dist.log_prob(act).sum(-1)          # (T, B)
+
+            if beta is not None:
+                w = lyapunov_weights(dJ, beta)
+                nll = -(w * logp).mean()
+            else:
+                nll = -logp.mean()
+
             mse = torch.nn.functional.mse_loss(mean, act)
+            loss = nll
+            j_loss = torch.zeros((), device=device)
+            if want_j:
+                j_loss = torch.nn.functional.mse_loss(j_pred, J)
+                loss = loss + lambda_j * j_loss
 
         if train:
             optimizer.zero_grad(set_to_none=True)
-            nll.backward()
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
             optimizer.step()
 
-        tot_nll += float(nll.detach()) * img.shape[1]
-        tot_mse += float(mse.detach()) * img.shape[1]
-        tot_n += img.shape[1]
+        bsz = img.shape[1]
+        tot_nll += float(nll.detach()) * bsz
+        tot_mse += float(mse.detach()) * bsz
+        tot_j += float(j_loss.detach()) * bsz
+        tot_n += bsz
     n = max(tot_n, 1)
-    return tot_nll / n, tot_mse / n
+    return tot_nll / n, tot_mse / n, tot_j / n
 
 
 def main(argv=None):
@@ -139,8 +212,9 @@ def main(argv=None):
         device = "cpu"
 
     train_eps, val_eps = split_episodes(args.cache, args.val_frac, args.seed)
-    train_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=train_eps)
-    val_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=val_eps)
+    delta = not args.absolute_target
+    train_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=train_eps, delta_target=delta)
+    val_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=val_eps, delta_target=delta)
     # Validation must use the *training* statistics, or the normalisation
     # itself leaks information about the held-out episodes.
     val_ds.state_mean, val_ds.state_std = train_ds.state_mean, train_ds.state_std
@@ -151,11 +225,19 @@ def main(argv=None):
     print(f"[data] images {train_ds.image_shape} proprio {train_ds.proprio_dim} "
           f"action {train_ds.action_dim}")
 
-    base = trivial_baselines(args.cache, train_eps, val_eps)
+    print(f"[loss] target={'a[t]-s[t] (delta)' if delta else 'a[t] (absolute)'} "
+          f"beta={args.beta} lambda_j={args.lambda_j}")
+    if (args.beta is not None or args.lambda_j > 0) and not train_ds.has_lyapunov_labels:
+        raise SystemExit(
+            "beta/lambda_j need J labels, but no J.npy in the cache. Run "
+            "scripts/label_demos_with_J.py first -- otherwise the weights are all "
+            "1 and the auxiliary target is all zeros, which trains silently wrong."
+        )
+
+    base = trivial_baselines(args.cache, train_eps, val_eps, delta)
     persist = base["persistence"]
-    print(f"[baseline] val MSE of learned-nothing predictors: "
-          f"constant={base['constant']:.5f} identity={base['identity']:.5f} "
-          f"persistence={persist:.5f}")
+    print("[baseline] val MSE of learned-nothing predictors: "
+          + "  ".join(f"{k}={v:.5f}" for k, v in base.items()))
     print(f"[baseline] target: val_mse/persistence < 1.0 (below 1 = learned "
           f"more than temporal autocorrelation)")
 
@@ -170,7 +252,8 @@ def main(argv=None):
         action_dim=train_ds.action_dim,
         feature_dim=args.feature_dim,
         hidden_dim=args.hidden_dim,
-        squash=False,  # joint targets are unbounded; see run_epoch
+        squash=False,  # targets are unbounded; see run_epoch
+        predict_j=args.lambda_j > 0.0,
     ).to(device)
     print(f"[policy] {sum(p.numel() for p in policy.parameters())/1e6:.2f}M params", flush=True)
 
@@ -185,15 +268,19 @@ def main(argv=None):
     history = []
     for epoch in range(args.epochs):
         t0 = time.time()
-        tr_nll, tr_mse = run_epoch(policy, train_dl, device, opt, args.max_grad_norm, args.limit_batches)
+        tr_nll, tr_mse, tr_j = run_epoch(policy, train_dl, device, opt, args.max_grad_norm,
+                                         args.limit_batches, args.beta, args.lambda_j)
         with torch.no_grad():
-            va_nll, va_mse = run_epoch(policy, val_dl, device, None, limit=args.limit_batches)
+            va_nll, va_mse, va_j = run_epoch(policy, val_dl, device, None,
+                                             limit=args.limit_batches,
+                                             beta=args.beta, lambda_j=args.lambda_j)
         sched.step()
 
         ratio = va_mse / max(persist, 1e-12)
         rec = {"epoch": epoch + 1, "train_nll": tr_nll, "train_mse": tr_mse,
                "val_nll": va_nll, "val_mse": va_mse, "vs_persistence": ratio,
-               "log_std": float(policy.log_std.mean()), "sec": time.time() - t0}
+               "train_j": tr_j, "val_j": va_j,
+               "log_std": float(policy.log_std.detach().mean()), "sec": time.time() - t0}
         history.append(rec)
         flag = "BEATS-PERSISTENCE" if ratio < 1.0 else "no better than persistence"
         print(f"[{epoch+1:3d}/{args.epochs}] train mse={tr_mse:.5f} | val mse={va_mse:.5f} | "
@@ -204,6 +291,7 @@ def main(argv=None):
             best = va_mse
             torch.save({"policy": policy.state_dict(), "epoch": epoch + 1,
                         "val_mse": va_mse, "args": vars(args),
+                        "delta_target": delta,
                         "state_mean": train_ds.state_mean.tolist(),
                         "state_std": train_ds.state_std.tolist()},
                        out / "best.pt")
