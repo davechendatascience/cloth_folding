@@ -55,6 +55,45 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def trivial_baselines(cache: str, train_eps, val_eps) -> dict:
+    """MSE of predictors that have learned nothing, on the validation episodes.
+
+    Reporting raw MSE is misleading here. At 30 fps consecutive joint targets
+    are nearly identical, so **persistence** (``a[t] = a[t-1]``) already scores
+    ~0.0026 -- and a policy that learns only to echo its previous output would
+    match that while folding nothing. The GRU can represent exactly that
+    degenerate solution, so it is a live attractor, not a hypothetical.
+
+    The number worth watching is therefore ``val_mse / persistence_mse``:
+    below 1 means the policy has learned something beyond temporal
+    autocorrelation; at or above 1 it has not, however small the raw MSE looks.
+    """
+    from pathlib import Path
+
+    import numpy as np
+
+    cache = Path(cache)
+    st = np.load(cache / "state.npy")
+    ac = np.load(cache / "action.npy")
+    ep = np.load(cache / "episode.npy")
+    m = np.isin(ep, val_eps)
+    s, a, e = st[m], ac[m], ep[m]
+
+    persist = a.copy()
+    persist[1:] = a[:-1]
+    for i in range(1, len(a)):  # never carry across an episode boundary
+        if e[i] != e[i - 1]:
+            persist[i] = s[i]
+
+    mse = lambda p: float(((a - p) ** 2).mean())  # noqa: E731
+    const = np.repeat(ac[np.isin(ep, train_eps)].mean(0)[None], len(a), 0)
+    return {
+        "constant": mse(const),
+        "identity": mse(s),
+        "persistence": mse(persist),
+    }
+
+
 def run_epoch(policy, loader, device, optimizer=None, max_grad_norm=1.0, limit=0):
     train = optimizer is not None
     policy.train(train)
@@ -112,6 +151,14 @@ def main(argv=None):
     print(f"[data] images {train_ds.image_shape} proprio {train_ds.proprio_dim} "
           f"action {train_ds.action_dim}")
 
+    base = trivial_baselines(args.cache, train_eps, val_eps)
+    persist = base["persistence"]
+    print(f"[baseline] val MSE of learned-nothing predictors: "
+          f"constant={base['constant']:.5f} identity={base['identity']:.5f} "
+          f"persistence={persist:.5f}")
+    print(f"[baseline] target: val_mse/persistence < 1.0 (below 1 = learned "
+          f"more than temporal autocorrelation)")
+
     dl = dict(batch_size=args.batch_size, num_workers=args.num_workers,
               pin_memory=(device != "cpu"), drop_last=True, persistent_workers=args.num_workers > 0)
     train_dl = DataLoader(train_ds, shuffle=True, **dl)
@@ -143,12 +190,14 @@ def main(argv=None):
             va_nll, va_mse = run_epoch(policy, val_dl, device, None, limit=args.limit_batches)
         sched.step()
 
+        ratio = va_mse / max(persist, 1e-12)
         rec = {"epoch": epoch + 1, "train_nll": tr_nll, "train_mse": tr_mse,
-               "val_nll": va_nll, "val_mse": va_mse,
+               "val_nll": va_nll, "val_mse": va_mse, "vs_persistence": ratio,
                "log_std": float(policy.log_std.mean()), "sec": time.time() - t0}
         history.append(rec)
-        print(f"[{epoch+1:3d}/{args.epochs}] train nll={tr_nll:9.3f} mse={tr_mse:.5f} | "
-              f"val nll={va_nll:9.3f} mse={va_mse:.5f} | log_std={rec['log_std']:+.2f} | "
+        flag = "BEATS-PERSISTENCE" if ratio < 1.0 else "no better than persistence"
+        print(f"[{epoch+1:3d}/{args.epochs}] train mse={tr_mse:.5f} | val mse={va_mse:.5f} | "
+              f"vs_persistence={ratio:.3f} [{flag}] | log_std={rec['log_std']:+.2f} | "
               f"{rec['sec']:.1f}s", flush=True)
 
         if va_mse < best:
@@ -157,7 +206,7 @@ def main(argv=None):
                         "val_mse": va_mse, "args": vars(args),
                         "state_mean": train_ds.state_mean, "state_std": train_ds.state_std},
                        out / "best.pt")
-    (out / "history.json").write_text(json.dumps(history, indent=2))
+    (out / "history.json").write_text(json.dumps({"baselines": base, "history": history}, indent=2))
     print(f"[done] best val mse={best:.5f} -> {out/'best.pt'}")
     return history
 

@@ -53,7 +53,18 @@ class LeHomeFoldGarmentRealDampedEnv:
 
         self.num_envs = backend.num_envs
         self.num_arms = backend.num_arms
-        self.action_dim = 3 * self.num_arms  # Sec. 3.1: 3D delta per arm
+
+        # "cartesian" is the spec's interface (Sec. 3.1): a 3D delta per arm,
+        # routed through the damped impedance controller.
+        # "joint" is the demonstrations' interface (and LeHome's own
+        # action_space=12): absolute joint position targets. A policy
+        # behaviour-cloned on the demos speaks joint, so finetuning it with RL
+        # requires the env to speak joint too -- otherwise the BC weights are
+        # meaningless in the new action space and the initialisation is wasted.
+        self.action_mode = getattr(cfg, "action_mode", "cartesian")
+        if self.action_mode not in ("cartesian", "joint"):
+            raise ValueError(f"action_mode must be cartesian|joint, got {self.action_mode!r}")
+        self.action_dim = 12 if self.action_mode == "joint" else 3 * self.num_arms
 
         self.controller = DampedImpedanceController(
             damping_ratio=cfg.damping_ratio,
