@@ -41,6 +41,12 @@ p.add_argument("--device", default="cpu")
 p.add_argument("--decimation", type=int, default=3)
 p.add_argument("--eps_per_garment", type=int, default=25)
 p.add_argument("--max_episodes", type=int, default=0, help="0 = all")
+p.add_argument("--shard", type=int, default=0)
+p.add_argument("--num_shards", type=int, default=1,
+               help="Split episodes across independent processes. One process "
+                    "uses ~1.3 cores and 7GB, so a 20-core box runs 6 shards "
+                    "comfortably and turns 5.5h into ~1h. Each shard writes its "
+                    "own files; merge_J_shards.py combines them.")
 args = p.parse_args()
 
 os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
@@ -63,12 +69,14 @@ try:
     n = len(action)
 
     # resume support -- a full pass is hours
+    sfx = "" if args.num_shards == 1 else f"_shard{args.shard}"
+    jf_path, df_path = cache / f"J{sfx}.npy", cache / f"J_done{sfx}.npy"
     J = np.full(n, np.nan, dtype=np.float32)
     done = np.zeros(0, dtype=np.int64)
-    if (cache / "J.npy").exists() and (cache / "J_done.npy").exists():
-        J = np.load(cache / "J.npy")
-        done = np.load(cache / "J_done.npy")
-        print(f"[resume] {len(done)} episodes already labelled")
+    if jf_path.exists() and df_path.exists():
+        J = np.load(jf_path)
+        done = np.load(df_path)
+        print(f"[resume] {len(done)} episodes already labelled in this shard")
 
     ginfo = json.loads((Path(args.dataset) / "meta" / "garment_info.json").read_text())
     gnames = list(ginfo.keys())
@@ -76,6 +84,9 @@ try:
     eps = np.unique(episode)
     if args.max_episodes:
         eps = eps[: args.max_episodes]
+    # Interleave rather than block-split, so every shard sees a mix of garments
+    # and a crash loses coverage evenly instead of an entire garment variant.
+    eps = eps[args.shard :: args.num_shards]
     todo = [e for e in eps if e not in done]
     print(f"[data] {len(eps)} episodes, {len(todo)} to label, {n} frames total")
 
@@ -107,8 +118,8 @@ try:
             J[rows[i]] = float(backend.compute_cloth_error())
 
         done = np.append(done, e)
-        np.save(cache / "J.npy", J)
-        np.save(cache / "J_done.npy", done)
+        np.save(jf_path, J)
+        np.save(df_path, done)
 
         span = J[rows]
         rate = (k + 1) / max(time.time() - t0, 1e-9)
@@ -117,7 +128,7 @@ try:
               f"min={span.min():6.3f}  | {k+1}/{len(todo)}  ETA {eta:.0f} min", flush=True)
 
     labelled = int(np.isfinite(J).sum())
-    print(f"\n[done] {labelled}/{n} frames labelled -> {cache/'J.npy'}")
+    print(f"\n[done] shard {args.shard}: {labelled}/{n} frames -> {jf_path}")
     if labelled:
         fin = J[np.isfinite(J)]
         print(f"  J range [{fin.min():.3f}, {fin.max():.3f}]  mean {fin.mean():.3f}")
