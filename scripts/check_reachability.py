@@ -46,6 +46,12 @@ p.add_argument("--dataset", default=None,
                     "(episode-specific garment poses). Without it the garment "
                     "is randomly placed and a replay is meaningless.")
 p.add_argument("--eps_per_garment", type=int, default=25)
+p.add_argument("--original_damping", action="store_true",
+               help="Replay on LeHome's original under-damped joints (zeta~0.53-0.65) "
+                    "instead of our per-joint critical damping. The demonstrations "
+                    "were recorded on the original plant, so critical damping makes "
+                    "the replay less faithful even though it is better for RL credit "
+                    "assignment -- this flag measures that trade.")
 args = p.parse_args()
 
 os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
@@ -84,10 +90,14 @@ try:
         print("[warn] no --dataset: garment pose will be RANDOM, so a replay "
               "cannot test fidelity (control condition only)")
 
-    backend = IsaacGarmentBackend(
-        IsaacGarmentCfg(garment_name=args.garment, device=args.device,
-                        decimation=args.decimation)
-    )
+    bcfg = IsaacGarmentCfg(garment_name=args.garment, device=args.device,
+                           decimation=args.decimation)
+    if args.original_damping:
+        bcfg.joint_damping = {}      # keep LeHome's configured D=0.60
+        print("[cfg] using LeHome's ORIGINAL joint damping (zeta~0.53-0.65)")
+    else:
+        print("[cfg] using per-joint CRITICAL damping (our measured D_crit)")
+    backend = IsaacGarmentBackend(bcfg)
     print(f"[env] dt={backend.dt:.4f}s ({1/backend.dt:.1f} Hz) garment={backend.garment_type}")
     thresh = 0.0  # J == 0 is exactly LeHome's success predicate
 
@@ -150,7 +160,8 @@ try:
     if args.out:
         Path(args.out).write_text(json.dumps(
             {"reachability_verified": verdict, "note": note, "episodes": rows,
-             "decimation": args.decimation, "garment": args.garment}, indent=2))
+             "decimation": args.decimation, "garment": args.garment,
+             "original_damping": bool(args.original_damping)}, indent=2))
         print(f"  wrote {args.out}")
     EXIT = 0 if verdict else 6
 
