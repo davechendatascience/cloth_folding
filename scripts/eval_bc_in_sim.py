@@ -59,7 +59,7 @@ try:
         IsaacGarmentBackend,
     )
 
-    ckpt = torch.load(args.ckpt, map_location=args.policy_device)
+    ckpt = torch.load(args.ckpt, map_location=args.policy_device, weights_only=False)
     state_mean = torch.as_tensor(ckpt["state_mean"], device=args.policy_device)
     state_std = torch.as_tensor(ckpt["state_std"], device=args.policy_device)
     cargs = ckpt["args"]

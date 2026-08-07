@@ -123,7 +123,7 @@ def main(argv=None):
         LeHomeFoldGarmentRealDampedEnv,
     )
 
-    ckpt = torch.load(args.bc_ckpt, map_location=args.policy_device)
+    ckpt = torch.load(args.bc_ckpt, map_location=args.policy_device, weights_only=False)
     bc_args = ckpt["args"]
     print(f"[bc] epoch={ckpt['epoch']} val_mse={ckpt['val_mse']:.5f}")
 

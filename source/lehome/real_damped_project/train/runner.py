@@ -165,7 +165,7 @@ class Runner:
         )
 
     def load(self, path: str) -> None:
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.policy.load_state_dict(ckpt["policy"])
         self.agent.optimizer.load_state_dict(ckpt["optimizer"])
         self.agent.lr = ckpt.get("lr", self.agent.lr)

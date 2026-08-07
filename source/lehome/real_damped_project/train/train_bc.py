@@ -204,7 +204,8 @@ def main(argv=None):
             best = va_mse
             torch.save({"policy": policy.state_dict(), "epoch": epoch + 1,
                         "val_mse": va_mse, "args": vars(args),
-                        "state_mean": train_ds.state_mean, "state_std": train_ds.state_std},
+                        "state_mean": train_ds.state_mean.tolist(),
+                        "state_std": train_ds.state_std.tolist()},
                        out / "best.pt")
     (out / "history.json").write_text(json.dumps({"baselines": base, "history": history}, indent=2))
     print(f"[done] best val mse={best:.5f} -> {out/'best.pt'}")
