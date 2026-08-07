@@ -56,6 +56,12 @@ def parse_args(argv=None):
                    help="Predict a[t] instead of a[t]-s[t]. This is what the first "
                         "run did, and it let proprio shortcut the loss (image "
                         "attribution 0.11). Kept only for reproducing that result.")
+    p.add_argument("--require_labels", action="store_true",
+                   help="Restrict to J-labelled episodes WITHOUT enabling the "
+                        "weighting. This is the control for a --beta/--lambda_j "
+                        "run: those restrict the episode set as a side effect, so "
+                        "comparing them against a run over all episodes confounds "
+                        "the loss change with a change in training-set size.")
     p.add_argument("--beta", type=float, default=None,
                    help="Lyapunov weighting temperature: w=exp(-dJ/beta). Requires "
                         "J.npy in the cache. None = unweighted BC.")
@@ -254,7 +260,7 @@ def main(argv=None):
         device = "cpu"
 
     train_eps, val_eps = split_episodes(args.cache, args.val_frac, args.seed)
-    if args.beta is not None or args.lambda_j > 0:
+    if args.beta is not None or args.lambda_j > 0 or args.require_labels:
         train_eps, val_eps = restrict_to_labelled(
             args.cache, train_eps, val_eps, args.seed)
     delta = not args.absolute_target

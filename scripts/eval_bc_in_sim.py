@@ -34,6 +34,9 @@ p.add_argument("--steps", type=int, default=300)
 p.add_argument("--decimation", type=int, default=3, help="3 -> 30Hz, matching the demos")
 p.add_argument("--baselines", action="store_true", default=True)
 p.add_argument("--out", default=None, help="write measured baselines + BC result as JSON")
+p.add_argument("--dataset", default=None,
+               help="LeRobot dir with meta/garment_info.json. Supplies the\n                    per-episode garment pose. Without it the garment starts\n                    wherever reset leaves it and the result reflects a\n                    distribution mismatch rather than the policy.")
+p.add_argument("--eps_per_garment", type=int, default=25)
 p.add_argument("--original_damping", action="store_true",
                help="Evaluate on LeHome's ORIGINAL under-damped joints, which is "
                     "the plant the demonstrations were recorded on. Our per-joint "
@@ -89,12 +92,43 @@ try:
         feature_dim=cargs["feature_dim"],
         hidden_dim=cargs["hidden_dim"],
         squash=False,
+        # Must match how the checkpoint was trained: a run with lambda_j > 0
+        # carries j_head weights, and loading those into a policy built without
+        # the head fails on unexpected keys. The head is unused at rollout
+        # time, but it has to exist to load.
+        predict_j=cargs.get("lambda_j", 0.0) > 0.0,
     ).to(args.policy_device).eval()
     policy.load_state_dict(ckpt["policy"])
+
+    # Garment poses from the demonstrations, one per episode.
+    #
+    # Without this the env resets to a default/random garment pose, and the
+    # policy is asked to fold a garment lying somewhere it never saw in
+    # training. That is not a policy failure but a distribution mismatch, and
+    # it is exactly the bug that made demo *replay* look like a 0.7% J
+    # reduction when the true figure with matched poses was 90%. Any
+    # closed-loop number measured without it is uninterpretable.
+    poses = []
+    if args.dataset:
+        ginfo = json.loads((Path(args.dataset) / "meta" / "garment_info.json").read_text())
+        gnames = list(ginfo.keys())
+        for e in range(args.episodes):
+            gi, li = e // args.eps_per_garment, e % args.eps_per_garment
+            if gi < len(gnames) and str(li) in ginfo[gnames[gi]]:
+                poses.append(ginfo[gnames[gi]][str(li)]["object_initial_pose"])
+        print(f"[pose] {len(poses)} per-episode garment poses from {args.dataset}")
+    if not poses:
+        print("[pose] WARNING: no per-episode poses -- the garment starts wherever "
+              "reset leaves it, which understates the policy through a "
+              "distribution mismatch. Pass --dataset for a meaningful number.")
 
     @torch.no_grad()
     def rollout(mode: str, ep: int):
         backend.reset_env_ids(torch.zeros(1, dtype=torch.long))
+        if ep < len(poses):
+            backend.set_garment_pose(poses[ep])
+            for _ in range(5):  # let the cloth settle at the new pose
+                backend.simulate()
         h = policy.initial_hidden(1, args.policy_device)
         js, speeds = [], []
         q0 = backend.get_proprioception().clone()

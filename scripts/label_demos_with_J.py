@@ -54,6 +54,15 @@ p.add_argument("--episode_min", type=int, default=0,
                     "the far end of the range while a first works up from the "
                     "start, without redoing each other's episodes.")
 p.add_argument("--episode_max", type=int, default=10**9, help="Restrict to episodes < this.")
+p.add_argument("--record_checkpoints", action="store_true",
+               help="Also store the per-frame check-point positions, not just J.\n"
+                    "J is literally functional(check_point_positions_cm()), so the\n"
+                    "positions are already computed and then discarded -- keeping\n"
+                    "them costs no extra simulation. They are the direct supervision\n"
+                    "target for a vision module (image -> deformable config), which\n"
+                    "the scalar J cannot provide: the demonstrations are ~69% a fixed\n"
+                    "script, so nothing learned through action imitation alone forces\n"
+                    "the policy to look at the cloth.")
 p.add_argument("--out_suffix", default=None,
                help="override the J/J_done filename suffix. Used to re-label\n                    already-done episodes into a separate file for A/B checks\n                    without touching the real labels.")
 p.add_argument("--shard", type=int, default=0)
@@ -92,6 +101,8 @@ try:
     sfx = args.out_suffix if args.out_suffix is not None else (
         "" if args.num_shards == 1 else f"_shard{args.shard}")
     jf_path, df_path = cache / f"J{sfx}.npy", cache / f"J_done{sfx}.npy"
+    cp_path = cache / f"checkpoints{sfx}.npy"
+    CP = None  # lazily allocated: the check-point count is garment-dependent
     J = np.full(n, np.nan, dtype=np.float32)
     done = np.zeros(0, dtype=np.int64)
     if jf_path.exists() and df_path.exists():
@@ -139,11 +150,28 @@ try:
         for i, a in enumerate(acts):
             backend.set_joint_targets(torch.as_tensor(a, dtype=torch.float32))
             backend.simulate()
-            J[rows[i]] = float(backend.compute_cloth_error())
+            if args.record_checkpoints:
+                pos = backend.check_point_positions_cm().detach().cpu().numpy()
+                pos = np.asarray(pos, dtype=np.float32).reshape(-1, 3)
+                if CP is None:
+                    CP = np.full((n, pos.shape[0], 3), np.nan, dtype=np.float32)
+                    if cp_path.exists():
+                        prev = np.load(cp_path)
+                        if prev.shape == CP.shape:
+                            CP = prev
+                CP[rows[i]] = pos
+                # J is a function of exactly these positions, so compute it from
+                # the same read rather than stepping the functional twice.
+                J[rows[i]] = float(backend.functional(
+                    torch.as_tensor(pos, device=backend.device).unsqueeze(0)))
+            else:
+                J[rows[i]] = float(backend.compute_cloth_error())
 
         done = np.append(done, e)
         np.save(jf_path, J)
         np.save(df_path, done)
+        if CP is not None:
+            np.save(cp_path, CP)
 
         span = J[rows]
         rate = (k + 1) / max(time.time() - t0, 1e-9)
