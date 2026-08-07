@@ -34,6 +34,12 @@ p.add_argument("--steps", type=int, default=300)
 p.add_argument("--decimation", type=int, default=3, help="3 -> 30Hz, matching the demos")
 p.add_argument("--baselines", action="store_true", default=True)
 p.add_argument("--out", default=None, help="write measured baselines + BC result as JSON")
+p.add_argument("--original_damping", action="store_true",
+               help="Evaluate on LeHome's ORIGINAL under-damped joints, which is "
+                    "the plant the demonstrations were recorded on. Our per-joint "
+                    "critical damping is a different plant from the one BC learned, "
+                    "so evaluating there understates the policy through a "
+                    "train/eval mismatch rather than a policy failure.")
 args = p.parse_args()
 
 os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
@@ -62,6 +68,11 @@ try:
     cfg = IsaacGarmentCfg(
         garment_name=args.garment, device=args.device, decimation=args.decimation
     )
+    if args.original_damping:
+        cfg.joint_damping = {}
+        print("[cfg] ORIGINAL under-damped joints (the plant BC learned from)")
+    else:
+        print("[cfg] per-joint CRITICAL damping (differs from the demo plant)")
     backend = IsaacGarmentBackend(cfg)
     print(f"[env] dt={backend.dt:.4f}s ({1/backend.dt:.1f} Hz), garment={backend.garment_type}")
 
@@ -145,7 +156,8 @@ try:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(json.dumps(
             {"summary": summary, "episodes": rows, "ckpt": args.ckpt,
-             "garment": args.garment, "decimation": args.decimation}, indent=2))
+             "garment": args.garment, "decimation": args.decimation,
+             "original_damping": bool(args.original_damping)}, indent=2))
         print(f"  wrote {args.out}")
 
     backend.close()
