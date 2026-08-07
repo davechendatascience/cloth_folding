@@ -1,0 +1,24 @@
+[project]
+name = "lehome-real-damped"
+version = "0.1.0"
+description = "Real-analysis-guided damped visual RL for LeHome cloth folding"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "torch>=2.9",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["source"]
+include = ["lehome*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::RuntimeWarning"]

@@ -1,0 +1,228 @@
+# Real-Analysis-Guided Damped Visual RL for Cloth Folding
+
+Implementation of `real_analysis_damped_cloth_folding_rl_spec.md` against the
+LeHome Challenge 2026 garment-folding task, on DGX Spark (GB10).
+
+The design treats cloth + robot + policy + RL updates as one dynamical system,
+and uses a Lyapunov-like functional `J` plus damping at every level to force
+non-oscillatory convergence to a folded configuration.
+
+---
+
+## Status
+
+| Component | State |
+|---|---|
+| Cloth error functional `J` (mock) | done, 21 tests |
+| **Garment functional `J` (real LeHome metric)** | done, 16 tests |
+| Damped impedance controller | done, 20 tests |
+| Lyapunov descent reward | done, 22 tests |
+| Vision + attention policy | done, 21 tests |
+| Damped PPO + runner | done, 21 tests |
+| Task env + mock backend | done, 11 tests |
+| **Isaac/LeHome backend adapter** | written; closed-loop verification in progress |
+
+**131/131 tests pass.** Isaac Sim launches headless on aarch64, the real garment
+env builds and steps, and `J` computes on real particle data. **No policy has
+been trained against the real environment yet.**
+
+---
+
+## Quick start
+
+```bash
+# project venv (CUDA 13, for the pure-torch package + tests)
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python \
+  --index-url https://download.pytorch.org/whl/cu130 \
+  --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match \
+  torch==2.13.0+cu130 torchvision==0.28.0+cu130
+uv pip install --python .venv/bin/python -e . --no-deps pytest
+
+.venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m lehome.real_damped_project.train.train_ppo_real_damped \
+  --mock --num_envs 256 --num_steps_per_env 32 --max_iterations 400 --device cuda
+```
+
+Anything touching Isaac Sim uses **lehome-challenge's venv** instead, and must
+set `LD_PRELOAD` + `OMNI_KIT_ACCEPT_EULA` (see [Isaac Sim operational
+notes](#isaac-sim-operational-notes)).
+
+---
+
+## Two functionals
+
+`J` must be continuous, non-negative, and zero exactly on the goal set. There
+are two implementations:
+
+* **`math/cloth_functional.py`** — soft-IoU + edge gap + wrinkle, for the mock
+  backend. The wrinkle term is `|R(x) − R(x_target)|`, *relative* to the target:
+  a folded garment is not flat, so penalising absolute roughness would put `J`'s
+  zero at an unfolded sheet.
+* **`math/garment_functional.py`** — **the real one.** LeHome scores folding
+  with a boolean over 4–5 pairwise check-point distances. This sums the *margin
+  violations* of those same conditions, so `J = 0` ⟺ `success_checker_garment_fold`
+  returns True. The goal set is *identical* to the official one, not merely
+  correlated with it. Verified against a transcription of their checker over 300
+  random configurations.
+
+Live reading on `Top_Long_Seen_0` at reset (real particle data, 14746 particles):
+
+```
+thresholds (cm): [7.2, 8.55, 7.2, 9.9, 9.0]
+  cond1 d(0,4)=25.86 ≤ 7.20  → violation 18.66
+  cond2 d(2,3)=44.85 ≤ 8.55  → violation 36.30
+  cond3 d(1,5)=27.25 ≤ 7.20  → violation 20.05
+  cond4 d(0,1)=17.34 ≥ 9.90  → violation  0.00
+  cond5 d(4,5)=13.71 ≥ 9.00  → violation  0.00
+J = 7.50
+```
+
+Note conditions 4–5 start satisfied — they only break under crumpling. All the
+signal is in the three "bring together" conditions, which argues for weighting
+rather than treating all conditions equally (`GarmentFunctionalCfg.weights`).
+
+---
+
+## Measured joint damping
+
+`scripts/measure_joint_damping.py`, step response at q=0, K=17.8, D=0.60:
+
+| joint | overshoot | ζ | ω_n | J (kg·m²) | D_crit | settle |
+|---|---|---|---|---|---|---|
+| shoulder_pan | 11.5% | 0.567 | 33.23 | 0.0161 | 1.071 | 15 |
+| shoulder_lift | 14.1% | 0.529 | 27.76 | 0.0231 | 1.283 | 27 |
+| elbow_flex | 6.8% | 0.649 | 32.80 | 0.0165 | 1.085 | 17 |
+| wrist_flex | 0.03% | 0.933 | 56.24 | 0.0056 | 0.633 | 11 |
+| wrist_roll | 0.00% | ≥1 | — | — | — | 12 |
+
+**mean ζ = 0.670 — under-damped**, contradicting the spec's ζ ≥ 1.
+
+The defect is *structural*: gains are uniform but inertia varies 4×, and
+ζ ∝ 1/√J, so proximal joints ring while distal ones are fine. A single global
+`D` cannot fix it — `D=1.283` would drive `wrist_flex` to ζ=2.03. Per-joint
+`D_j = 2K/ω_n,j` is in `MEASURED_CRITICAL_DAMPING`.
+
+This matters because **plant overshoot makes `J(x_t)` non-monotone regardless of
+the policy**, undermining the spec's convergence argument below the level the
+reward can reach.
+
+`decimation=1` (90 Hz) means the policy issues up to **27 commands before the
+plant responds**. Adapter default is 20 (≈4.5 Hz); `stiffness_scale` buys speed
+back since settling ∝ 1/√K.
+
+*Caveat: J is configuration-dependent, measured at q=0 with other joints held,
+single-DOF fit ignores coupling. Re-measure at a folding pose before relying on
+these quantitatively.*
+
+---
+
+## Findings that changed the design
+
+### The spec's reward is exploitable
+§2.3 pairs a *proportional* ascent penalty with a *constant* descent bonus, so
+oscillating with amplitude `a` nets `λ_down − λ_up·a` — **positive for any
+`a < λ_down/λ_up`** (0.1 with the spec's defaults). Measured: ringing scored
+**+8.6** vs **−0.4** for holding still. Default is now `mono_mode="proportional"`;
+`"constant"` reproduces the spec verbatim and warns.
+
+### Damping suppresses exploration
+`−λ_v‖v‖` and `−λ_Δa‖Δa‖` are both zero when stationary, so **freezing beats
+every exploratory policy** (−538 vs −541/−664). The theorem only needs
+*eventually* monotone `J` — a tail property — so applying these globally is
+strictly stronger than required, and it is paid for during discovery. Proposed
+fix: anneal with `J`, mirroring the gating `r_mono` already has.
+
+### LeHome's IK solver disagrees with the simulator
+At q≈0 the URDF places the gripper 0.452 m from base; the sim's `gripper` body
+is at 0.386 m. Distances-from-base are rotation-invariant, so this is a genuine
+kinematic mismatch. **A commanded 5 cm move drove the arm 0.394 m.** Use
+`DifferentialIKController(ik_method="dls")` on the simulator's own Jacobian
+instead — consistent by construction, and DLS adds damping at the kinematic
+layer, a fourth level the spec never names.
+
+### Bugs found in this implementation
+* Rayleigh damping sign error — the stiffness-proportional term was *injecting*
+  energy (diverged at only ~1.5×/substep, so it read as a CFL problem).
+* GAE conflated `terminated` with `truncated`, so every time-limit was scored as
+  a real terminal state with zero future value.
+* Unbounded Gaussian mean against the env's ±1 clamp: the mean drifted to 2.05
+  with 83% of components saturated, the advantage stopped discriminating, and
+  the policy random-walked outward. Fixed with a tanh-squashed Gaussian.
+* Command-path integrator wind-up produced a sustained limit cycle
+  (`x_cmd` ran 0.31 past a 0.15 goal). Fixed with a rate-limited leash.
+
+### The mock cloth cannot fold — treat it as CI only
+An oracle driving both grippers exactly onto their folded-target positions
+reaches only `J = 1.51` against a 0.02 threshold, because the un-gripped
+vertices end 0.204 m away. The mass-spring sheet has no table contact, friction,
+self-collision, or bending stiffness, so moving two corners just stretches it.
+**All mock training runs were optimising an unreachable objective.** The mock is
+still useful as fast CI for the RL machinery; it is not a folding testbed.
+
+---
+
+## Isaac Sim operational notes
+
+* **Kit never exits on its own.** Non-daemon threads mean a raised exception or
+  interrupt leaves the process at ~300% CPU forever, and **it ignores SIGTERM** —
+  `kill -9` is required. Always launch via `tasks/isaac_app.py`, which closes in
+  a `finally` and `os._exit`s.
+* `OMNI_KIT_ACCEPT_EULA=YES` or Kit blocks on a prompt and dies with
+  *"Unable to bootstrap inner kit kernel: EOF when reading a line"*.
+* `LD_PRELOAD` needs system libgomp + torch's bundled one; Isaac Lab prints the
+  path but it goes **stale after any torch reinstall**.
+* `env.initialize_obs()` must run after `gym.make(...).unwrapped`, before
+  stepping — `DirectRLEnv` never calls it and `GarmentObject.reset()` raises
+  without it.
+* Cold start ~55 s, warm ~14 s; garment env build ~60–70 s on top.
+
+---
+
+## lehome-challenge patches
+
+Four dependency defects, all silent. Patched in their `pyproject.toml`:
+
+| defect | symptom |
+|---|---|
+| `pinocchio` → nose plugin | **all IK dead**; the real library is `pin` |
+| torch/torchvision cu128 pair | resolves to **CPU**, GPU unused |
+| `open3d==0.19.0` | no ARM64 wheel → `0.18.0` |
+| `required-environments` x86_64 | blocks aarch64 despite ARM wheels existing |
+
+Also: `isaaclab.sh -i none` silently upgrades torch (reverting the CUDA fix) and
+its core install fails on `flatdict` needing `pkg_resources` under uv build
+isolation.
+
+`torch 2.7.0+cu128` **works on GB10** (sm_120 cubins run on sm_121). CUDA-13
+wheels are impossible here: `isaacsim_core` pins `torch==2.7.0` exactly and
+cu130 starts at 2.9.0.
+
+---
+
+## Layout
+
+```
+source/lehome/real_damped_project/
+  math/cloth_functional.py          J for the mock backend
+  math/garment_functional.py        J for the real LeHome success metric
+  math/functional_design.md         design notes for J and the damping hierarchy
+  control/impedance_controller.py   clipped/low-passed integrator + anti-windup
+  tasks/rewards.py                  discrete Lyapunov descent reward
+  tasks/backend.py                  LeHomeBackend protocol + mock cloth
+  tasks/isaac_garment_backend.py    real GarmentEnv adapter (DLS differential IK)
+  tasks/isaac_app.py                guaranteed-teardown Isaac launcher
+  tasks/lehome_fold_garment_real_damped_task.py
+  tasks/cfg.py                      config builder + registration + make_env
+  policy/vision_attention_policy.py conv → spatial attention → GRU → actor/critic
+  train/ppo.py                      PPO + KL trust region + prior anchor + Polyak
+  train/runner.py                   rollout loop + convergence diagnostics
+scripts/
+  launch_probe.py                   verify Isaac + garment env + J
+  verify_fk_ik.py                   FK/IK vs the simulator
+  measure_joint_damping.py          step-response ζ measurement
+  test_adapter_closed_loop.py       Cartesian accuracy of the adapter
+```
+
+The package is symlinked into `lehome-challenge/source/lehome/lehome/` so it
+imports as `lehome.real_damped_project`, matching the spec's intended layout.
