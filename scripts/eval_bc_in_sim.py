@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -32,6 +33,7 @@ p.add_argument("--episodes", type=int, default=3)
 p.add_argument("--steps", type=int, default=300)
 p.add_argument("--decimation", type=int, default=3, help="3 -> 30Hz, matching the demos")
 p.add_argument("--baselines", action="store_true", default=True)
+p.add_argument("--out", default=None, help="write measured baselines + BC result as JSON")
 args = p.parse_args()
 
 os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
@@ -130,7 +132,21 @@ try:
         print(f"\n  BC beats frozen on J_min: {better}")
         if not better:
             print("  => BC has not learned anything useful yet.")
-    print(json.dumps(rows, indent=2))
+    if args.out:
+        summary = {
+            m: {
+                "J_end": float(np.mean([r["J_end"] for r in rows if r["mode"] == m])),
+                "J_min": float(np.mean([r["J_min"] for r in rows if r["mode"] == m])),
+                "successes": int(sum(r["success"] for r in rows if r["mode"] == m)),
+                "n": int(sum(1 for r in rows if r["mode"] == m)),
+            }
+            for m in modes
+        }
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(
+            {"summary": summary, "episodes": rows, "ckpt": args.ckpt,
+             "garment": args.garment, "decimation": args.decimation}, indent=2))
+        print(f"  wrote {args.out}")
 
     backend.close()
 except Exception:
