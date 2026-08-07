@@ -114,14 +114,28 @@ Separately, `SingleClothPrim` / `SingleParticleSystem` wrap one prim and
 `get_object_particle_position()` reads one cloth, so per-env J is not even
 expressible.
 
-**What it would take.**
-1. Move robot + camera prim paths under `/World/envs/env_.*/`.
-2. Create the garment per env (or clone it) rather than once at `/World/Object/`.
-3. Replace the `Single*` particle wrappers with a batched cloth view so particle
-   positions come back as `(num_envs, N, 3)`.
-4. Vectorise `GarmentFoldFunctional` over the env dimension — already written
-   batched, so this part is free.
-5. Keep the bedroom scene global (it is static) to avoid replicating geometry.
+**What it would take** — scoped 2026-08-07, and it is more tractable than the
+first read suggested:
+
+1. Move robot + camera prim paths to `/World/envs/env_.*/Robot/...` in
+   `garment_bi_cfg_v2`, so Isaac Lab's cloner replicates them.
+2. **Create one `GarmentObject` per env in a loop.** `GarmentObject.__init__`
+   already takes an arbitrary `prim_path` — LeHome merely hardcodes
+   `/World/Object/{name}` at the call site. So this needs no new Isaac API,
+   just `/World/envs/env_{i}/Garment`.
+3. **Keep the `Single*` wrappers, hold a list of N of them**, and stack their
+   particle reads into `(num_envs, P, 3)`. A true batched cloth view would be
+   better, but N host-side reads per step is functionally correct and adequate
+   at modest N — and it avoids depending on APIs that may not exist.
+4. `GarmentFoldFunctional` is already batched over envs, so J is free.
+5. Keep the bedroom scene and light global (static geometry, no need to
+   replicate).
+
+**Main unknowns.** Whether PhysX particle systems replicate cleanly per env at
+all (particle systems are global-ish objects in PhysX and may need one system
+with N cloths, or N systems); and how per-env reads scale — step 3 is O(N)
+host calls, which could become the new bottleneck and would then justify a
+proper batched view.
 
 **Why it is worth it.** It is the only lever that fixes the GPU utilisation
 problem at its root (62% compute / 0% memory bandwidth = not enough parallel
