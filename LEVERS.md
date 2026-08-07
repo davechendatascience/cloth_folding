@@ -28,7 +28,7 @@ was fine while a different one was severed.
 |---|---|---|
 | **camera** | is cloth state recoverable from the observation at all? | **OK-ish.** 3× RGB at 84×84. Depth (the direct topology signal) is *not* in the merged dataset. |
 | **spatial attention** | attention entropy vs uniform | **OK.** 2.753 vs 4.796 uniform, peak weight 0.25 vs 0.008. It attends somewhere structured. |
-| **attention → reasoning** | perturb images vs proprio, compare \|Δaction\| | **SEVERED.** image/proprio influence = **0.11**. The policy ignores what the attention computed. |
+| **attention → reasoning** | perturb images vs proprio, compare \|Δaction\| | **SEVERED.** image/proprio influence = **0.0445** on `runs/bc_top_long/best.pt`, measured by `scripts/measure_attribution.py`. The policy ignores what the attention computed. |
 | **reasoning → joints** | closed-loop Cartesian accuracy | **OK.** 8/8 moves to 0.0000 m residual via DLS differential IK. |
 | **joints → cloth** | does replay reach J = 0? | **OK.** 2/3 episodes to J = 0.000; ~90% mean reduction. |
 | **cloth → J monotone** | `mono_violation_rate` near goal | **untested** — never reached the near-goal band. |
@@ -37,6 +37,18 @@ was fine while a different one was severed.
 all check out; the policy simply doesn't *use* the visual features. That is why
 the fix is a loss change (delta target + `Ĵ` auxiliary) rather than a bigger
 encoder or better IK — capacity and control were never the constraint.
+
+**The "0.11" figure was never reproducible (2026-08-07).** It came from an
+ad-hoc check whose perturbation scheme was not recorded. `measure_attribution.py`
+scores the *same checkpoint* at **0.0445**, because the ratio depends entirely on
+how the two modalities are perturbed — this script scales each by its own std,
+so the comparison is scale-free; an absolute-epsilon version would mostly report
+that images and joint angles live on different scales.
+
+Consequence: the pre-registered pass criterion "attribution ≫ 0.11" was not
+checkable as written. **Use 0.0445 as the baseline and compare with the same
+script**, via `--baseline`. A diagnostic number is only a threshold if the code
+that produced it still exists.
 
 Levers by link:
 
