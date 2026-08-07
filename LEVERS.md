@@ -9,6 +9,51 @@ Status key: **measured** = we have numbers · **tried** = attempted, outcome not
 
 ---
 
+## The pipeline these levers act on
+
+```
+   camera  ──▶  spatial attention  ──▶  reasoning  ──▶  joint manipulation  ──▶  cloth
+     │              │                      │                 │                     │
+  is the        does it ground         does it map        do the commands      does J fall
+  cloth         on the cloth?          state → plan?      move the cloth?      monotonically?
+  visible?
+```
+
+Everything in this project is a link in that chain, and **a break anywhere makes
+every downstream measurement meaningless**. So diagnose by localising the break
+before tuning anything — three of our expensive detours were tuning a link that
+was fine while a different one was severed.
+
+| link | how to measure it | status |
+|---|---|---|
+| **camera** | is cloth state recoverable from the observation at all? | **OK-ish.** 3× RGB at 84×84. Depth (the direct topology signal) is *not* in the merged dataset. |
+| **spatial attention** | attention entropy vs uniform | **OK.** 2.753 vs 4.796 uniform, peak weight 0.25 vs 0.008. It attends somewhere structured. |
+| **attention → reasoning** | perturb images vs proprio, compare \|Δaction\| | **SEVERED.** image/proprio influence = **0.11**. The policy ignores what the attention computed. |
+| **reasoning → joints** | closed-loop Cartesian accuracy | **OK.** 8/8 moves to 0.0000 m residual via DLS differential IK. |
+| **joints → cloth** | does replay reach J = 0? | **OK.** 2/3 episodes to J = 0.000; ~90% mean reduction. |
+| **cloth → J monotone** | `mono_violation_rate` near goal | **untested** — never reached the near-goal band. |
+
+**The whole failure is one link.** Camera, attention, joint control and physics
+all check out; the policy simply doesn't *use* the visual features. That is why
+the fix is a loss change (delta target + `Ĵ` auxiliary) rather than a bigger
+encoder or better IK — capacity and control were never the constraint.
+
+Levers by link:
+
+- **camera** — resolution, camera count, depth (needs `dataset_challenge`, not the
+  merged set), pretrained encoder
+- **spatial attention** — the `Ĵ(o)` auxiliary head is the direct supervision:
+  predicting J *requires* representing check-point geometry
+- **attention → reasoning** — delta target (kills the proprio bypass), action
+  chunking (kills the recurrent bypass), multimodal head (stops mode-averaging
+  collapsing motion to zero)
+- **reasoning → joints** — action space (joint vs Cartesian), DLS λ, plant damping
+- **joints → cloth** — `joint_damping` (10× on replay fidelity), decimation,
+  solver iterations
+- **cloth → J** — λ_v / λ_Δa annealing, `r_mono` gating, ΔJ weighting
+
+---
+
 ## Throughput
 
 | lever | status | effect | notes |
