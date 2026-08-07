@@ -131,11 +131,28 @@ first read suggested:
 5. Keep the bedroom scene and light global (static geometry, no need to
    replicate).
 
-**Main unknowns.** Whether PhysX particle systems replicate cleanly per env at
-all (particle systems are global-ish objects in PhysX and may need one system
-with N cloths, or N systems); and how per-env reads scale — step 3 is O(N)
-host calls, which could become the new bottleneck and would then justify a
-proper batched view.
+**Measured constraint (2026-08-07): cloths must be created before `sim.reset()`.**
+Adding a `GarmentObject` to a *running* sim fails with
+
+```
+ClothPrim.initialize() → self._count = self._physics_view.count
+AttributeError: 'NoneType' object has no attribute 'count'
+```
+
+`_physics_view` is None because the physics tensor view is built once at
+`sim.reset()` and a later-created cloth is never registered with it. This is a
+**lifecycle constraint, not a particle-system limit** — so the plan is "create N
+garments inside `_setup_scene()`", which is exactly where LeHome already creates
+its one. It does *not* block parallel envs.
+
+Getting here took three wrong guesses (bad prim path → particle systems can't
+replicate → fundamentally impossible) across two full env builds, because the
+probe swallowed the traceback into a one-line message. **Get the traceback
+before forming a hypothesis** — the answer was in the stack the whole time.
+
+**Remaining unknowns.** Whether one PhysX particle *system* can host N cloths or
+each env needs its own; and whether O(N) host-side particle reads per step
+become the new bottleneck, which would then justify a proper batched view.
 
 **Why it is worth it.** It is the only lever that fixes the GPU utilisation
 problem at its root (62% compute / 0% memory bandwidth = not enough parallel

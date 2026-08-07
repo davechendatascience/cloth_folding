@@ -47,6 +47,11 @@ p.add_argument("--render_interval", type=int, default=0,
                     "arrive. Measured at 100000: 3 minutes, 0 episodes, GPU at "
                     "0%%, plus a stray zenity dialog. Moderate values untested.")
 p.add_argument("--max_episodes", type=int, default=0, help="0 = all")
+p.add_argument("--episode_min", type=int, default=0,
+               help="Restrict to episodes >= this. Lets a second labeller work "
+                    "the far end of the range while a first works up from the "
+                    "start, without redoing each other's episodes.")
+p.add_argument("--episode_max", type=int, default=10**9, help="Restrict to episodes < this.")
 p.add_argument("--shard", type=int, default=0)
 p.add_argument("--num_shards", type=int, default=1,
                help="Split episodes across independent processes. One process "
@@ -92,6 +97,7 @@ try:
         eps = eps[: args.max_episodes]
     # Interleave rather than block-split, so every shard sees a mix of garments
     # and a crash loses coverage evenly instead of an entire garment variant.
+    eps = eps[(eps >= args.episode_min) & (eps < args.episode_max)]
     eps = eps[args.shard :: args.num_shards]
     todo = [e for e in eps if e not in done]
     print(f"[data] {len(eps)} episodes, {len(todo)} to label, {n} frames total")
