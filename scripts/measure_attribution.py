@@ -102,7 +102,7 @@ policy = VisionAttentionPolicy(
 policy.load_state_dict(ck.get("policy", ck.get("model", ck.get("state_dict"))))
 policy.eval()
 
-img_d, prop_d, j_true, j_pred_all = [], [], [], []
+img_d, prop_d, hid_d, j_true, j_pred_all = [], [], [], [], []
 
 with torch.no_grad():
     for bi, batch in enumerate(dl):
@@ -138,6 +138,15 @@ with torch.no_grad():
         img_d.append((pert_img - base).norm(dim=-1).mean().cpu())
         prop_d.append((pert_prop - base).norm(dim=-1).mean().cpu())
 
+        # Third input, never previously measured: the recurrent state. If the
+        # policy is replaying a phase template, the GRU is acting as a learned
+        # clock and this will dominate both sensory channels -- which would mean
+        # the "reasoning" stage is tracking time, not reasoning about cloth.
+        h0 = policy.initial_hidden(img.shape[1], device)
+        hp = h0 + args.sigma * torch.randn_like(h0)
+        pert_h = policy.forward_sequence(img, prop, hp)[0]
+        hid_d.append((pert_h - base).norm(dim=-1).mean().cpu())
+
 img_inf = float(torch.stack(img_d).mean())
 prop_inf = float(torch.stack(prop_d).mean())
 ratio = img_inf / prop_inf if prop_inf > 0 else float("inf")
@@ -146,7 +155,10 @@ out = {"ckpt": args.ckpt, "image_influence": round(img_inf, 6),
        "proprio_influence": round(prop_inf, 6), "ratio": round(ratio, 4),
        "sigma": args.sigma, "val_episodes": len(val_eps)}
 
+hid_inf = float(torch.stack(hid_d).mean()) if hid_d else float("nan")
+out["hidden_influence"] = round(hid_inf, 6)
 print(f"  image influence   : {img_inf:.6f}")
+print(f"  hidden influence  : {hid_inf:.6f}   (recurrent state = phase clock?)")
 print(f"  proprio influence : {prop_inf:.6f}")
 print(f"  ratio (image/prop): {ratio:.4f}   baseline {args.baseline:.4f} "
       f"({ratio/max(args.baseline,1e-9):.2f}x)")

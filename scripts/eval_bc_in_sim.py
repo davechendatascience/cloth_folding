@@ -34,6 +34,14 @@ p.add_argument("--steps", type=int, default=300)
 p.add_argument("--decimation", type=int, default=3, help="3 -> 30Hz, matching the demos")
 p.add_argument("--baselines", action="store_true", default=True)
 p.add_argument("--out", default=None, help="write measured baselines + BC result as JSON")
+p.add_argument("--randomize", action="store_true",
+               help="Enable LeHome's texture + light randomisation at every reset.\n"
+                    "This is a BEHAVIOURAL test of whether the policy uses vision at\n"
+                    "all: a vision-blind policy is exactly invariant to appearance, so\n"
+                    "its closed-loop J will not move. Attribution perturbs the network;\n"
+                    "this perturbs the world, and is not fooled by the same failure\n"
+                    "modes. Note the demos were recorded with DR disabled, so this is\n"
+                    "also an out-of-distribution probe.")
 p.add_argument("--dataset", default=None,
                help="LeRobot dir with meta/garment_info.json. Supplies the\n                    per-episode garment pose. Without it the garment starts\n                    wherever reset leaves it and the result reflects a\n                    distribution mismatch rather than the policy.")
 p.add_argument("--eps_per_garment", type=int, default=25)
@@ -84,6 +92,15 @@ try:
         print("[cfg] per-joint CRITICAL damping (differs from the demo plant)")
     backend = IsaacGarmentBackend(cfg)
     print(f"[env] dt={backend.dt:.4f}s ({1/backend.dt:.1f} Hz), garment={backend.garment_type}")
+
+    if args.randomize:
+        # Both ship disabled in particle_garment_cfg.yaml; the env re-reads these
+        # dicts on every _reset_idx, so flipping them here is enough.
+        backend.env.texture_cfg["enable"] = True
+        backend.env.light_cfg["enable"] = True
+        print("[dr] texture + light randomisation ON (table surface, dome light)")
+    else:
+        print("[dr] randomisation off -- appearance matches the demonstrations")
 
     policy = VisionAttentionPolicy(
         image_channels=backend.image_shape[0],

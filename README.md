@@ -22,13 +22,19 @@ non-oscillatory convergence to a folded configuration.
 | Task env + mock backend | done, 24 tests |
 | Isaac/LeHome backend adapter | done, **closed-loop verified 8/8 to 0.0000 m** |
 | Run contracts + watchdogs | done, 25 tests |
-| BC pipeline (preprocess/dataset/train) | done, running |
+| BC pipeline (preprocess/dataset/train) | done, **two runs completed — both failed, see below** |
+| Parallel envs (`num_envs > 1`) | works at N=4; **not training-ready** (static scene is global, envs are not physically equivalent) |
 | Damped-RL finetuning entrypoint | written, not yet run |
 
-**172/172 tests pass.** Isaac Sim launches headless on aarch64, the real garment
+**198/198 tests pass.** Isaac Sim launches headless on aarch64, the real garment
 env builds and steps, `J` computes on real particle data, and **replayed
-demonstrations reach `J = 0`** (see below). **No policy has been trained against
-the real environment yet.**
+demonstrations reach `J = 0`** (see below).
+
+**Behaviour cloning has now been run and evaluated closed-loop. It does not
+work**, and the reason is a property of the demonstrations rather than of the
+loss — see [Why behaviour cloning fails here](#why-behaviour-cloning-fails-here).
+Do not read the mechanisms below as achieving their goals; several are measured
+to be insufficient, and the measurements are recorded alongside them.
 
 ## Reachability: the real task is solvable here
 
@@ -44,6 +50,13 @@ the real environment yet.**
 Random-pose control: **0.7%**. So the env reproduces the demonstrations, `J = 0`
 is attainable, and critical damping does not prevent folding. This is exactly
 what the mock failed (oracle best 1.51 against a 0.02 threshold).
+
+**At scale the success rate is 39%, not the 2/3 this three-episode sample
+suggests.** Over 85 labelled episodes, replay reaches `J = 0` in 33 (median best
+`J` 0.407). Reachability is still demonstrated — 33 episodes genuinely fold —
+but "the demonstrations succeed" is a weaker claim than the small sample implied,
+and it is consistent with a largely open-loop script that works when the garment
+starts favourably.
 
 Two protocol requirements, both load-bearing: `meta/garment_info.json` gives a
 per-episode `object_initial_pose`, and `reset()` randomises placement — replay
@@ -143,6 +156,77 @@ these quantitatively.*
 ---
 
 ## Findings that changed the design
+
+### Why behaviour cloning fails here
+
+Two BC runs, both evaluated closed-loop in the real env with matched per-episode
+garment poses on the demonstration plant:
+
+| run | train eps | loss | `val_mse/persistence` | closed-loop |
+|---|---|---|---|---|
+| `bc_top_long` | 225 | delta target | 1.10 | — |
+| `bc_j` | 84 | delta + `β=0.1` + `λ_j=0.2` | 1.176 | **0/3, indistinguishable from frozen** |
+
+```
+bc      J_end=7.647  J_min=7.168  success=0/3
+frozen  J_end=7.602  J_min=7.118  success=0/1
+random  J_end=7.716  J_min=7.122  success=0/1
+```
+
+Neither run beat a predictor that ignores the observation entirely. Note the
+baselines are what make this readable: BC alone shows `J` rising 7.11 → 7.70,
+which looks like the policy dragging the cloth, but frozen rises 7.12 → 7.60
+with *zero* arm motion. Most of that is the cloth settling. BC is inert, not
+destructive.
+
+**The cause is the data, not the loss.** Measured offline on the cache:
+
+| predictor | sees | held-out R² |
+|---|---|---|
+| phase only — mean trajectory vs normalised time | **nothing** | **0.688** |
+| ridge on 5 frames of proprio, 1-step | proprio | 0.862 |
+| ridge on 5 frames of proprio, 80-step chunk | proprio | 0.725 |
+
+A predictor knowing only how far through the episode it is explains 69% of
+held-out action variance. **No loss function can create a need for vision in
+data where vision is not needed**, which is why the delta target, the ΔJ
+weighting and the `Ĵ` head all left image attribution at ~0.11.
+
+This also refutes action chunking as a fix: proprio still predicts at R² 0.725
+across 80 steps, so there is no chunkable horizon where the shortcut dies.
+
+**What the diagnostics actually show.** Perturbing each input and measuring
+`|Δaction|` (`scripts/measure_attribution.py`):
+
+```
+proprio influence : 0.5969     <- dominates
+hidden influence  : 0.1173
+image influence   : 0.0661
+J_hat R² (vision only): 0.87
+```
+
+The encoder reads cloth state well — `Ĵ` from the attention-pooled visual
+context alone reaches R² 0.87. **The representation exists and is not routed.**
+`λ_j` supervises the encoder through a head wired to `z`; nothing in that
+gradient reaches the fusion weights the actor uses. In control terms BC learned
+the *feedforward* (the phase template) and never learned the *feedback* (the
+pose-dependent correction).
+
+Residual BC — subtracting the phase template so only the pose-dependent part
+remains — was the natural next fix. The residual is 87% of the template by RMS,
+but it is **not predictable from the initial garment pose** (held-out R² −0.042)
+and has no persistent within-episode structure (half-to-half corr −0.006). It
+looks like demonstrator jitter.
+
+**Consequence:** BC has a low ceiling here by construction, and visual
+adaptation has to be *discovered* rather than imitated. That is a far stronger
+argument for the damped-RL stage than throughput ever was — RL's objective is
+`J`, which depends on cloth configuration, so vision becomes load-bearing
+because the objective makes it so.
+
+One caveat for that stage: **the BC actor is a bad prior** (worse than frozen on
+`J_min`), so `prior_kl_coef` should not anchor to it. The encoder transfers; the
+actor should not.
 
 ### The spec's reward is exploitable
 §2.3 pairs a *proportional* ascent penalty with a *constant* descent bonus, so
