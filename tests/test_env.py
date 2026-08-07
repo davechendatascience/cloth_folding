@@ -255,3 +255,56 @@ def test_J_decreases_when_the_cloth_is_folded_by_hand():
         assert j < prev + 1e-6, f"J increased while interpolating toward the goal at t={t}"
         prev = j
     assert prev < cfg.success_threshold
+
+
+# --------------------------------------------------- real-backend config guards
+
+
+def test_sync_does_not_apply_mock_fields_to_a_real_backend():
+    """sync() pushed cloth/impedance params that IsaacGarmentCfg does not have,
+    which would raise AttributeError on the first real-backend launch."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class FakeIsaacCfg:  # stands in for IsaacGarmentCfg without needing Isaac
+        garment_name: str = "Top_Long_Seen_0"
+
+    cfg = build_lehome_real_damped_cfg()
+    cfg.use_mock_backend = False
+    cfg.num_envs = 1
+    cfg.backend = FakeIsaacCfg()
+    cfg.sync()  # must not touch rayleigh_alpha / rows / functional
+    assert not hasattr(cfg.backend, "rayleigh_alpha")
+
+
+def test_sync_rejects_multiple_envs_on_the_real_backend():
+    """The LeHome scene uses absolute prim paths and single-prim particle APIs,
+    so num_envs>1 silently shares one garment between all envs."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class FakeIsaacCfg:
+        garment_name: str = "Top_Long_Seen_0"
+
+    cfg = build_lehome_real_damped_cfg()
+    cfg.use_mock_backend = False
+    cfg.backend = FakeIsaacCfg()
+    cfg.num_envs = 8
+    with pytest.raises(ValueError, match="not authored for cloning"):
+        cfg.sync()
+
+
+def test_action_mode_defaults_to_cartesian_and_accepts_joint():
+    cfg = build_lehome_real_damped_cfg()
+    assert cfg.action_mode == "cartesian"
+    cfg.action_mode = "joint"
+    env = make_env(num_envs=2, sim_device="cpu", use_mock_backend=True,
+                   cfg_overrides={"action_mode": "joint"})
+    assert env.action_dim == 12
+    assert env.action_mode == "joint"
+
+
+def test_unknown_action_mode_is_rejected():
+    with pytest.raises(ValueError, match="action_mode"):
+        make_env(num_envs=2, sim_device="cpu", use_mock_backend=True,
+                 cfg_overrides={"action_mode": "wiggle"})

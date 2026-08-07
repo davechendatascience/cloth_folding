@@ -107,13 +107,40 @@ class RealDampedTaskCfg:
     # --- reward (Sec. 2.3 / 5.1) ---
     reward: LyapunovRewardCfg = field(default_factory=LyapunovRewardCfg)
 
+    # --- action interface ---
+    action_mode: str = "cartesian"
+    """``"cartesian"``: the spec's 3D delta per arm (Sec. 3.1), through the
+    damped impedance controller. ``"joint"``: 12-D absolute joint position
+    targets, which is what the demonstrations and LeHome's own
+    ``action_space=12`` use. A behaviour-cloned policy speaks joint, so
+    finetuning it requires this to match or the BC weights are meaningless."""
+
     # --- backend ---
     use_mock_backend: bool = True
-    backend: MockClothCfg = field(default_factory=MockClothCfg)
+    backend: Any = field(default_factory=MockClothCfg)
+    """``MockClothCfg`` for the mock, ``IsaacGarmentCfg`` for the real env."""
 
     def sync(self) -> "RealDampedTaskCfg":
-        """Propagate the top-level knobs into the backend config."""
+        """Propagate the top-level knobs into the backend config.
+
+        Only the mock accepts these: the cloth material and EE impedance
+        parameters describe the mass-spring stand-in, and have no counterpart
+        in ``IsaacGarmentCfg`` (where cloth is PhysX particles and the
+        impedance lives in the actuator gains). Applying them blindly raises
+        AttributeError on the first real-backend launch.
+        """
         b = self.backend
+        if not isinstance(b, MockClothCfg):
+            # The real backend owns its own configuration; nothing to push down
+            # except the fact that Isaac is single-env.
+            if self.num_envs != 1:
+                raise ValueError(
+                    f"num_envs={self.num_envs} but the LeHome scene is not authored "
+                    "for cloning (absolute prim paths, single-prim particle APIs), "
+                    "so only num_envs=1 is supported on the real backend"
+                )
+            return self
+
         b.num_envs = self.num_envs
         b.dt = self.dt
         b.image_res = self.image_res
