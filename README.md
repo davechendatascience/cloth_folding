@@ -19,12 +19,37 @@ non-oscillatory convergence to a folded configuration.
 | Lyapunov descent reward | done, 22 tests |
 | Vision + attention policy | done, 21 tests |
 | Damped PPO + runner | done, 21 tests |
-| Task env + mock backend | done, 11 tests |
-| **Isaac/LeHome backend adapter** | written; closed-loop verification in progress |
+| Task env + mock backend | done, 24 tests |
+| Isaac/LeHome backend adapter | done, **closed-loop verified 8/8 to 0.0000 m** |
+| Run contracts + watchdogs | done, 25 tests |
+| BC pipeline (preprocess/dataset/train) | done, running |
+| Damped-RL finetuning entrypoint | written, not yet run |
 
-**131/131 tests pass.** Isaac Sim launches headless on aarch64, the real garment
-env builds and steps, and `J` computes on real particle data. **No policy has
-been trained against the real environment yet.**
+**172/172 tests pass.** Isaac Sim launches headless on aarch64, the real garment
+env builds and steps, `J` computes on real particle data, and **replayed
+demonstrations reach `J = 0`** (see below). **No policy has been trained against
+the real environment yet.**
+
+## Reachability: the real task is solvable here
+
+`scripts/check_reachability.py` replays demonstrated joint actions through
+`IsaacGarmentBackend` at 30 Hz with our critical damping and our J:
+
+| ep | J | reduction | success |
+|---|---|---|---|
+| 0 | 7.086 → 2.200 | 69% | ✗ |
+| 1 | 7.004 → **0.000** | 100% | ✓ |
+| 2 | 7.486 → **0.000** | 100% | ✓ |
+
+Random-pose control: **0.7%**. So the env reproduces the demonstrations, `J = 0`
+is attainable, and critical damping does not prevent folding. This is exactly
+what the mock failed (oracle best 1.51 against a 0.02 threshold).
+
+Two protocol requirements, both load-bearing: `meta/garment_info.json` gives a
+per-episode `object_initial_pose`, and `reset()` randomises placement — replay
+without `set_garment_pose()` yields 0.7% and looks precisely like env
+infidelity. Merged datasets concatenate per-garment sets, so global episode `e`
+maps to garment `e // 25`, local `e % 25`.
 
 ---
 
@@ -151,6 +176,21 @@ layer, a fourth level the spec never names.
   the policy random-walked outward. Fixed with a tanh-squashed Gaussian.
 * Command-path integrator wind-up produced a sustained limit cycle
   (`x_cmd` ran 0.31 past a 0.15 goal). Fixed with a rate-limited leash.
+
+### Low loss can mean nothing without a baseline
+BC's validation MSE read as excellent (0.00283, RMSE ≈ 3°) for two epochs while
+the policy was **worse than repeating its previous action** (persistence
+scores 0.00256). At 30 fps consecutive joint targets are nearly identical, so
+the metric is dominated by temporal autocorrelation — and a GRU can represent
+that degenerate solution exactly. The trainer now reports
+`val_mse / persistence` with an explicit `BEATS-PERSISTENCE` flag.
+
+### On-policy RL from scratch is not reachable on this hardware
+Measured throughput at `num_envs=1`: **1.40 policy steps/s**, 3.2× slower than
+realtime, with physics 77% and `J` 22% of each step (rendering is 0.9% —
+the opposite of what I expected). That is **83 days for 10⁷ steps**, against an
+exploration landscape where freezing beats exploring. Hence BC first, damped RL
+as finetuning.
 
 ### The mock cloth cannot fold — treat it as CI only
 An oracle driving both grippers exactly onto their folded-target positions
