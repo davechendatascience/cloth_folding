@@ -197,3 +197,44 @@ def test_report_is_honest_before_any_data():
     w = Watchdog(contract())
     r = w.report()
     assert "evals=0" in r and "n/a" in r
+
+
+# ------------------------------------------- baselines must be intrinsic
+
+
+def test_report_leads_with_the_relative_figure_not_the_absolute():
+    """Two BC epochs read as 'excellent' (MSE 0.00283) while being worse than
+    persistence (0.00256). The baseline is what makes a number mean anything,
+    so it must be printed first rather than recalled afterwards."""
+    w = Watchdog(contract(baselines={"persistence": 0.00256},
+                          must_beat_baseline="persistence",
+                          success_threshold=1e-6))
+    w.update({"J": 0.00283})
+    r = w.report()
+    assert "best/persistence=1.105" in r
+    assert "worse than baseline" in r
+    # the absolute is present but subordinate
+    assert r.index("best/persistence") < r.index("abs=")
+
+
+def test_report_flags_beating_the_baseline():
+    w = Watchdog(contract(baselines={"persistence": 0.00256},
+                          must_beat_baseline="persistence",
+                          success_threshold=1e-6))
+    w.update({"J": 0.00237})
+    assert "BEATS baseline" in w.report()
+
+
+def test_report_says_uninterpretable_without_a_baseline():
+    c = RunContract(name="x", primary_metric="J", baselines={}, must_beat_baseline="")
+    w = Watchdog(c)
+    w.update({"J": 0.5})
+    assert "NO BASELINE" in w.report() and "uninterpretable" in w.report()
+
+
+def test_relative_matches_the_bc_incident():
+    w = Watchdog(contract(baselines={"persistence": 0.00256},
+                          must_beat_baseline="persistence", success_threshold=1e-6))
+    assert abs(w.relative(0.00424) - 1.656) < 0.01   # epoch 1
+    assert abs(w.relative(0.00283) - 1.105) < 0.01   # epoch 2
+    assert abs(w.relative(0.00237) - 0.926) < 0.01   # epoch 3, first real learning

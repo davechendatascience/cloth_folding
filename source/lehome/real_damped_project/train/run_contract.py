@@ -262,14 +262,41 @@ class Watchdog:
 
     # ------------------------------------------------------------------- report
 
+    def relative(self, value: float) -> Optional[float]:
+        """``value / baseline``, or ``None`` if no must-beat baseline is set.
+
+        For a minimised metric, < 1 means better than the baseline.
+        """
+        ref = self.c.baselines.get(self.c.must_beat_baseline)
+        if ref is None or ref == 0:
+            return None
+        return value / ref
+
     def report(self) -> str:
+        """Leads with the *relative* figure, never the bare absolute.
+
+        Reporting an absolute number without its baseline is how two epochs of
+        behaviour cloning were read as "excellent" (val MSE 0.00283, RMSE ~3
+        degrees) while the policy was in fact worse than repeating its previous
+        action (persistence MSE 0.00256). The baseline is not commentary to add
+        afterwards -- it is what makes the number mean anything, so it is
+        printed first and always.
+        """
         n = len(self.values)
         t = self.trend()
-        beats = ""
-        if self.c.must_beat_baseline in self.c.baselines and self.best is not None:
-            ref = self.c.baselines[self.c.must_beat_baseline]
-            beats = f"  beats_{self.c.must_beat_baseline}={self._better(self.best, ref)}"
+        if self.best is None:
+            return f"evals=0 best=n/a trend=n/a (no data)"
+
+        rel = self.relative(self.best)
+        if rel is None:
+            head = f"best={self.best:.4g} (NO BASELINE -- uninterpretable)"
+        else:
+            beats = "BEATS" if rel < 1.0 else "worse than"
+            head = (
+                f"best/{self.c.must_beat_baseline}={rel:.3f} [{beats} baseline] "
+                f"(abs={self.best:.4g})"
+            )
         return (
-            f"evals={n} best={self.best if self.best is not None else float('nan'):.4g} "
-            f"@{self.best_eval} trend={'n/a' if t is None else f'{t:+.4g}'}{beats}"
+            f"{head} evals={n} @{self.best_eval} "
+            f"trend={'n/a' if t is None else f'{t:+.4g}'}"
         )
