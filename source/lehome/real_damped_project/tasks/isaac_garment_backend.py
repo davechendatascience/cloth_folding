@@ -171,6 +171,10 @@ class IsaacGarmentCfg:
     image_size: int = 84
     """Cameras are 480x640; downsampled to this square for the policy."""
     use_depth: bool = False
+    proprio_matches_dataset: bool = True
+    """Emit the 12-D joint vector the demonstrations store, rather than the
+    richer 30-D state. Required for BC -> RL finetuning to see one observation
+    space; see :meth:`IsaacGarmentBackend.get_proprioception`."""
 
     functional: GarmentFunctionalCfg = field(default_factory=GarmentFunctionalCfg)
 
@@ -258,7 +262,7 @@ class IsaacGarmentBackend:
 
     @property
     def proprio_dim(self) -> int:
-        return 12 + 12 + 6  # joint pos, joint vel, both EE positions
+        return 12 if self.cfg.proprio_matches_dataset else 12 + 12 + 6
 
     def _ee_pos_w(self, arm_i: int) -> torch.Tensor:
         return self.arms[arm_i].data.body_pos_w[:, self.ee_body_idx, :]
@@ -344,8 +348,20 @@ class IsaacGarmentBackend:
         return torch.cat(mats, dim=1).to(self.device)
 
     def get_proprioception(self) -> torch.Tensor:
-        """Robot state only -- no cloth information (Sec. 3.1)."""
+        """Robot state only -- no cloth information (Sec. 3.1).
+
+        With ``proprio_matches_dataset`` (the default) this returns exactly the
+        12 joint positions that the LeHome demonstrations store as
+        ``observation.state``. That equality is load-bearing: a policy
+        behaviour-cloned on the demos and then finetuned with RL must see the
+        *same* observation in both stages, or the finetuning starts from a
+        distribution the network has never encountered. The richer 30-D vector
+        (adding velocities and EE positions) is available for pure-RL runs,
+        where no demonstration compatibility is required.
+        """
         q = torch.cat([self.arms[0].data.joint_pos, self.arms[1].data.joint_pos], dim=-1)
+        if self.cfg.proprio_matches_dataset:
+            return q.to(self.device)
         dq = torch.cat([self.arms[0].data.joint_vel, self.arms[1].data.joint_vel], dim=-1)
         ee = self.get_end_effector_positions().flatten(1)
         return torch.cat([q, dq, ee], dim=-1).to(self.device)
