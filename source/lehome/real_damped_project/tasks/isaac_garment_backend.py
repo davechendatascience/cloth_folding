@@ -322,6 +322,29 @@ class IsaacGarmentBackend:
             for k, jid in enumerate(self.arm_joint_ids):
                 self._joint_targets[:, base + jid] = q_des[:, k]
 
+    def set_joint_targets(self, q_des: torch.Tensor) -> None:
+        """Command 12-D joint position targets directly, bypassing IK.
+
+        This is the action space the demonstrations use (and LeHome's own
+        ``action_space = 12``), so behaviour cloning and any BC-initialised RL
+        finetuning drive the robot through here rather than through
+        :meth:`set_end_effector_targets`. The Cartesian path remains available
+        for pure-RL runs that want the spec's 6-D delta interface.
+
+        Targets are clamped to the articulation's soft joint limits; an
+        unclamped target from an imitation policy that has drifted off-manifold
+        would otherwise ask the actuator for an unreachable pose and saturate
+        the joint against its stop.
+        """
+        q = torch.as_tensor(q_des, dtype=torch.float32, device=self.device)
+        if q.shape[-1] != 12:
+            raise ValueError(f"expected 12 joint targets, got {tuple(q.shape)}")
+        q = q.view(1, 12)
+
+        lo = torch.cat([a.data.soft_joint_pos_limits[..., 0] for a in self.arms], dim=-1)
+        hi = torch.cat([a.data.soft_joint_pos_limits[..., 1] for a in self.arms], dim=-1)
+        self._joint_targets = torch.max(torch.min(q, hi.to(q)), lo.to(q))
+
     def simulate(self) -> None:
         obs, _, _, _, _ = self.env.step(self._joint_targets)
         self._last_obs = obs

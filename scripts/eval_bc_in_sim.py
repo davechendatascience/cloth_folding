@@ -1,0 +1,152 @@
+"""Roll a behaviour-cloned policy out in the real LeHome env and measure J.
+
+Validation MSE cannot answer the only question that matters. A policy can match
+demonstrated actions closely and still never fold -- imitation error compounds
+over a 300-step rollout, and the metric the challenge scores is a boolean over
+garment check-point distances, not action similarity.
+
+So this reports what the challenge reports: final J, best J reached, and
+LeHome's own success predicate (J == 0), plus the damping diagnostics the spec
+cares about (monotonicity of J, EE speed).
+
+Baselines are included because an absolute J number is uninterpretable on its
+own: a frozen policy and a random policy bound what "doing nothing" and "moving
+arbitrarily" score, and the BC policy has to beat both to mean anything.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+import numpy as np
+
+p = argparse.ArgumentParser()
+p.add_argument("--ckpt", required=True)
+p.add_argument("--garment", default="Top_Long_Seen_0")
+p.add_argument("--device", default="cpu", help="simulator device")
+p.add_argument("--policy_device", default="cuda")
+p.add_argument("--episodes", type=int, default=3)
+p.add_argument("--steps", type=int, default=300)
+p.add_argument("--decimation", type=int, default=3, help="3 -> 30Hz, matching the demos")
+p.add_argument("--baselines", action="store_true", default=True)
+args = p.parse_args()
+
+os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
+from isaaclab.app import AppLauncher  # noqa: E402
+
+launcher = AppLauncher(headless=True, enable_cameras=True, device=args.device)
+simulation_app = launcher.app
+
+EXIT = 0
+try:
+    import torch  # noqa: E402
+    from lehome.real_damped_project.policy.vision_attention_policy import (  # noqa: E402
+        VisionAttentionPolicy,
+    )
+    from lehome.real_damped_project.tasks.isaac_garment_backend import (  # noqa: E402
+        IsaacGarmentCfg,
+        IsaacGarmentBackend,
+    )
+
+    ckpt = torch.load(args.ckpt, map_location=args.policy_device)
+    state_mean = torch.as_tensor(ckpt["state_mean"], device=args.policy_device)
+    state_std = torch.as_tensor(ckpt["state_std"], device=args.policy_device)
+    cargs = ckpt["args"]
+    print(f"[ckpt] epoch={ckpt['epoch']} val_mse={ckpt['val_mse']:.5f}")
+
+    cfg = IsaacGarmentCfg(
+        garment_name=args.garment, device=args.device, decimation=args.decimation
+    )
+    backend = IsaacGarmentBackend(cfg)
+    print(f"[env] dt={backend.dt:.4f}s ({1/backend.dt:.1f} Hz), garment={backend.garment_type}")
+
+    policy = VisionAttentionPolicy(
+        image_channels=backend.image_shape[0],
+        proprio_dim=backend.proprio_dim,
+        action_dim=12,
+        feature_dim=cargs["feature_dim"],
+        hidden_dim=cargs["hidden_dim"],
+        squash=False,
+    ).to(args.policy_device).eval()
+    policy.load_state_dict(ckpt["policy"])
+
+    @torch.no_grad()
+    def rollout(mode: str, ep: int):
+        backend.reset_env_ids(torch.zeros(1, dtype=torch.long))
+        h = policy.initial_hidden(1, args.policy_device)
+        js, speeds = [], []
+        q0 = backend.get_proprioception().clone()
+        for t in range(args.steps):
+            if mode == "bc":
+                img = backend.render_cameras().to(args.policy_device)
+                prop = (backend.get_proprioception().to(args.policy_device) - state_mean) / state_std
+                mean, _, h, _ = policy(img, prop, h)
+                act = mean.to(backend.device)
+            elif mode == "frozen":
+                act = q0.clone()
+            else:  # random walk around the start pose
+                act = q0 + torch.randn_like(q0) * 0.05
+
+            backend.set_joint_targets(act)
+            backend.simulate()
+            js.append(float(backend.compute_cloth_error()))
+            speeds.append(float(
+                torch.linalg.vector_norm(backend.get_end_effector_velocities().flatten())
+            ))
+        term, _ = backend.check_done()
+        # monotone violations: J rising by more than epsilon
+        dj = np.diff(js)
+        return {
+            "mode": mode, "ep": ep,
+            "J_start": js[0], "J_end": js[-1], "J_min": float(np.min(js)),
+            "success": bool(term.any()),
+            "rise_frac": float((dj > 1e-3).mean()),
+            "ee_speed": float(np.mean(speeds)),
+        }
+
+    modes = ["bc"] + (["frozen", "random"] if args.baselines else [])
+    rows = []
+    for mode in modes:
+        for ep in range(args.episodes if mode == "bc" else 1):
+            r = rollout(mode, ep)
+            rows.append(r)
+            print(f"  [{r['mode']:6s} ep{r['ep']}] J {r['J_start']:7.3f} -> {r['J_end']:7.3f}  "
+                  f"min={r['J_min']:7.3f}  success={r['success']}  "
+                  f"J_rise={r['rise_frac']:.2f}  ee_speed={r['ee_speed']:.4f}", flush=True)
+
+    print("\n=== summary ===")
+    for mode in modes:
+        sel = [r for r in rows if r["mode"] == mode]
+        print(f"  {mode:6s}  J_end={np.mean([r['J_end'] for r in sel]):7.3f}  "
+              f"J_min={np.mean([r['J_min'] for r in sel]):7.3f}  "
+              f"success={sum(r['success'] for r in sel)}/{len(sel)}")
+    bc = [r for r in rows if r["mode"] == "bc"]
+    fr = [r for r in rows if r["mode"] == "frozen"]
+    if fr:
+        better = np.mean([r["J_min"] for r in bc]) < np.mean([r["J_min"] for r in fr])
+        print(f"\n  BC beats frozen on J_min: {better}")
+        if not better:
+            print("  => BC has not learned anything useful yet.")
+    print(json.dumps(rows, indent=2))
+
+    backend.close()
+except Exception:
+    import traceback
+
+    traceback.print_exc()
+    EXIT = 1
+finally:
+    import threading
+
+    def _force(code=EXIT):
+        sys.stdout.flush(); sys.stderr.flush(); os._exit(code)
+
+    w = threading.Timer(30.0, _force); w.daemon = True; w.start()
+    try:
+        simulation_app.close()
+    except Exception:
+        pass
+    _force()
