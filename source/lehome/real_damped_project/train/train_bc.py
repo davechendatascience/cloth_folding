@@ -31,7 +31,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ..data.dataset import LeHomeDemoDataset, split_episodes
+from ..data.dataset import (LeHomeDemoDataset, build_phase_template,
+                            split_episodes)
 from ..policy.vision_attention_policy import VisionAttentionPolicy
 
 
@@ -56,6 +57,13 @@ def parse_args(argv=None):
                    help="Predict a[t] instead of a[t]-s[t]. This is what the first "
                         "run did, and it let proprio shortcut the loss (image "
                         "attribution 0.11). Kept only for reproducing that result.")
+    p.add_argument("--residual", action="store_true",
+                   help="Subtract the phase-conditioned mean trajectory from the "
+                        "target, so BC learns only the pose-dependent feedback. "
+                        "The demonstrations are ~69%% a fixed script (phase alone "
+                        "predicts held-out actions at R2=0.688), and that template "
+                        "is identical across episodes, so it cannot require vision. "
+                        "Removing it leaves the part only the cameras can explain.")
     p.add_argument("--require_labels", action="store_true",
                    help="Restrict to J-labelled episodes WITHOUT enabling the "
                         "weighting. This is the control for a --beta/--lambda_j "
@@ -113,7 +121,8 @@ def restrict_to_labelled(cache: str, train_eps, val_eps, seed: int = 0):
     return tr, va
 
 
-def trivial_baselines(cache: str, train_eps, val_eps, delta: bool = True) -> dict:
+def trivial_baselines(cache: str, train_eps, val_eps, delta: bool = True,
+                      template=None) -> dict:
     """MSE of predictors that have learned nothing, on the validation episodes.
 
     Reporting raw MSE is misleading here. At 30 fps consecutive joint targets
@@ -130,10 +139,25 @@ def trivial_baselines(cache: str, train_eps, val_eps, delta: bool = True) -> dic
 
     import numpy as np
 
+    from ..data.dataset import phase_of_frames
+
     cache = Path(cache)
     st = np.load(cache / "state.npy")
     ac = np.load(cache / "action.npy")
     ep = np.load(cache / "episode.npy")
+
+    # With --residual the network predicts (a - s) minus the phase template, so
+    # the baselines must be computed on that same quantity. Comparing residual
+    # predictions against a persistence baseline on the full target inflates the
+    # ratio by whatever the template contributes -- measured 7.5x when this was
+    # missed, which reads as catastrophic failure rather than a mismatched
+    # yardstick.
+    tmpl_per_frame = None
+    if template is not None:
+        tmpl = np.asarray(template, dtype=np.float32)
+        idx = np.clip((phase_of_frames(ep) * (len(tmpl) - 1)).round().astype(np.int64),
+                      0, len(tmpl) - 1)
+        tmpl_per_frame = tmpl[idx]
     m = np.isin(ep, val_eps)
     s, a, e = st[m], ac[m], ep[m]
 
@@ -149,12 +173,17 @@ def trivial_baselines(cache: str, train_eps, val_eps, delta: bool = True) -> dic
     # previous *delta*.
     if delta:
         tgt = a - s
+        if tmpl_per_frame is not None:
+            tgt = tgt - tmpl_per_frame[m]
         prev = np.zeros_like(tgt)
         prev[1:] = tgt[:-1]
         prev[np.asarray(e[:-1] != e[1:]).nonzero()[0] + 1] = 0.0
         mse = lambda p: float(((tgt - p) ** 2).mean())  # noqa: E731
         train_mask = np.isin(ep, train_eps)
-        const = np.repeat((ac[train_mask] - st[train_mask]).mean(0)[None], len(a), 0)
+        tr_tgt = ac[train_mask] - st[train_mask]
+        if tmpl_per_frame is not None:
+            tr_tgt = tr_tgt - tmpl_per_frame[train_mask]
+        const = np.repeat(tr_tgt.mean(0)[None], len(a), 0)
         return {
             "constant": mse(const),
             "zero (do nothing)": mse(np.zeros_like(tgt)),
@@ -264,8 +293,19 @@ def main(argv=None):
         train_eps, val_eps = restrict_to_labelled(
             args.cache, train_eps, val_eps, args.seed)
     delta = not args.absolute_target
-    train_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=train_eps, delta_target=delta)
-    val_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=val_eps, delta_target=delta)
+
+    # Built from the TRAINING episodes only -- a template over all episodes
+    # would leak held-out trajectories into the target.
+    template = None
+    if args.residual:
+        template = build_phase_template(args.cache, train_eps, delta_target=delta)
+        print(f"[data] phase template {template.shape} from {len(train_eps)} train episodes; "
+              "target is now the pose-dependent residual")
+
+    train_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=train_eps,
+                                 delta_target=delta, template=template)
+    val_ds = LeHomeDemoDataset(args.cache, args.seq_len, episodes=val_eps,
+                               delta_target=delta, template=template)
     # Validation must use the *training* statistics, or the normalisation
     # itself leaks information about the held-out episodes.
     val_ds.state_mean, val_ds.state_std = train_ds.state_mean, train_ds.state_std
@@ -285,7 +325,7 @@ def main(argv=None):
             "1 and the auxiliary target is all zeros, which trains silently wrong."
         )
 
-    base = trivial_baselines(args.cache, train_eps, val_eps, delta)
+    base = trivial_baselines(args.cache, train_eps, val_eps, delta, template)
     persist = base["persistence"]
     print("[baseline] val MSE of learned-nothing predictors: "
           + "  ".join(f"{k}={v:.5f}" for k, v in base.items()))
@@ -344,7 +384,13 @@ def main(argv=None):
                         "val_mse": va_mse, "args": vars(args),
                         "delta_target": delta,
                         "state_mean": train_ds.state_mean.tolist(),
-                        "state_std": train_ds.state_std.tolist()},
+                        "state_std": train_ds.state_std.tolist(),
+                        # A residual policy predicts only the feedback term, so
+                        # any rollout MUST add the feedforward template back or
+                        # the arm will barely move. Stored here so the eval
+                        # cannot silently forget it.
+                        "template": (template.tolist() if template is not None else None),
+                        "val_eps": np.asarray(val_eps).tolist()},
                        out / "best.pt")
     (out / "history.json").write_text(json.dumps({"baselines": base, "history": history}, indent=2))
     print(f"[done] best val mse={best:.5f} -> {out/'best.pt'}")

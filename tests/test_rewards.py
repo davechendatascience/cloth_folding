@@ -239,3 +239,74 @@ def test_rejects_bad_config():
         LyapunovRewardCfg(epsilon=-1.0)
     with pytest.raises(ValueError):
         LyapunovRewardCfg(near_gate="nonsense")
+
+
+class TestDampingGate:
+    """Damping must not make standing still the best available action.
+
+    Measured on the mock task with the spec's global damping: freeze scored
+    -538 against -664 for exploring. Both damping terms are zero when the arm
+    is stationary, so before the policy has found anything worth doing, the
+    highest-return action is no action. The convergence argument only needs
+    monotone descent *eventually*, so damping belongs in the near-goal band.
+    """
+
+    def _cfg(self, **kw):
+        from lehome.real_damped_project.tasks.rewards import LyapunovRewardCfg
+        return LyapunovRewardCfg(**kw)
+
+    def _reward(self, cfg, n=1, adim=3):
+        from lehome.real_damped_project.tasks.rewards import LyapunovDescentReward
+        return LyapunovDescentReward(cfg, num_envs=n, action_dim=adim)
+
+    def test_rejects_unknown_gate(self):
+        with pytest.raises(ValueError, match="damping_gate"):
+            self._cfg(damping_gate="sometimes")
+
+    def test_rejects_nonpositive_j_anneal(self):
+        with pytest.raises(ValueError, match="j_anneal"):
+            self._cfg(damping_gate="smooth", j_anneal=0.0)
+
+    def test_always_is_the_default_and_unchanged(self):
+        """Backward compatibility: the spec-literal behaviour must be default."""
+        assert self._cfg().damping_gate == "always"
+
+    def test_near_gate_switches_damping_off_far_from_goal(self):
+        cfg = self._cfg(damping_gate="near", j_near=0.02, lambda_v=1.0, lambda_delta_a=1.0)
+        r = self._reward(cfg)
+        far = torch.tensor([5.0])          # nowhere near folded
+        vel = torch.ones(1, 1, 3) * 3.0
+        act = torch.ones(1, 3) * 2.0
+        r.compute(far, vel, act)            # first call seeds prev_J
+        _, comp = r.compute(far, vel, act)
+        assert float(comp["r_vel"]) == pytest.approx(0.0), \
+            "damping applied far from the goal re-creates the freeze basin"
+        assert float(comp["r_act"]) == pytest.approx(0.0)
+        assert float(comp["damping_gate"]) == pytest.approx(0.0)
+
+    def test_always_gate_still_damps_far_from_goal(self):
+        """The contrast case: this is the behaviour that created the freeze basin."""
+        cfg = self._cfg(damping_gate="always", lambda_v=1.0, lambda_delta_a=1.0)
+        r = self._reward(cfg)
+        far = torch.tensor([5.0])
+        vel = torch.ones(1, 1, 3) * 3.0
+        act = torch.ones(1, 3) * 2.0
+        r.compute(far, vel, act)
+        _, comp = r.compute(far, vel, act)
+        assert float(comp["r_vel"]) < 0.0, "spec-literal damping should penalise motion anywhere"
+
+    def test_smooth_gate_is_monotone_in_J(self):
+        """Damping must strengthen as the garment approaches folded, never weaken."""
+        cfg = self._cfg(damping_gate="smooth", j_anneal=1.0, lambda_v=1.0)
+        gates = []
+        for j_val in (4.0, 2.0, 1.0, 0.25, 0.0):
+            g = float(torch.exp(-torch.tensor(j_val) / cfg.j_anneal))
+            gates.append(g)
+        assert gates == sorted(gates), "gate must increase as J decreases"
+        assert gates[-1] == pytest.approx(1.0), "full damping at J=0"
+        assert gates[0] < 0.05, "damping essentially off when far from the goal"
+
+    def test_smooth_gate_reaches_1_over_e_at_j_anneal(self):
+        cfg = self._cfg(damping_gate="smooth", j_anneal=2.0)
+        g = float(torch.exp(-torch.tensor(2.0) / cfg.j_anneal))
+        assert g == pytest.approx(0.3679, abs=1e-3)

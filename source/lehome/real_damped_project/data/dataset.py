@@ -46,6 +46,7 @@ class LeHomeDemoDataset(Dataset):
         normalize_proprio: bool = True,
         episodes: Optional[np.ndarray] = None,
         delta_target: bool = True,
+        template: Optional[np.ndarray] = None,
     ) -> None:
         cache_dir = Path(cache_dir)
         meta = json.loads((cache_dir / "meta.json").read_text())
@@ -75,6 +76,16 @@ class LeHomeDemoDataset(Dataset):
         # so *where the cloth is* becomes the only remaining signal.
         self.delta_target = bool(delta_target)
         self.target = (self.action - self.state) if self.delta_target else self.action
+
+        # Residual target: subtract the phase-conditioned feedforward template,
+        # leaving only the pose-dependent feedback the cameras can explain.
+        self.template = None
+        if template is not None:
+            self.template = np.asarray(template, dtype=np.float32)
+            ph = phase_of_frames(self.episode)
+            idx = np.clip((ph * (len(self.template) - 1)).round().astype(np.int64),
+                          0, len(self.template) - 1)
+            self.target = self.target - self.template[idx]
 
         # --- Lyapunov labels (optional) -----------------------------------
         # J(x_t) per frame, produced by replaying demonstrations in the
@@ -144,6 +155,59 @@ class LeHomeDemoDataset(Dataset):
             z = torch.zeros(self.seq_len, dtype=torch.float32)
             out.extend([z, z])
         return tuple(out)
+
+
+
+def build_phase_template(cache_dir: str, episodes=None, grid: int = 200,
+                         delta_target: bool = True) -> np.ndarray:
+    """Mean demonstrated trajectory as a function of normalised episode phase.
+
+    The demonstrations are ~69% a fixed script: a predictor knowing only how far
+    through the episode it is explains that much of held-out action variance,
+    against 0.862 for a ridge on proprio history. So plain BC spends its
+    capacity reproducing a template that is identical across episodes and
+    therefore cannot require vision -- which is why image attribution sat at
+    0.11 and the policy folded nothing in closed loop.
+
+    In control terms this is the **feedforward** term. Subtracting it leaves the
+    **feedback** term: the pose-dependent correction that responds to where this
+    particular garment actually is, which proprio and phase cannot explain and
+    only vision can.
+
+    Built from ``episodes`` (the training split) alone. Building it over all
+    episodes would leak held-out trajectories into the training target.
+
+    Returns ``(grid, action_dim)``, indexed by phase in [0, 1].
+    """
+    cache = Path(cache_dir)
+    action = np.load(cache / "action.npy").astype(np.float32)
+    state = np.load(cache / "state.npy").astype(np.float32)
+    ep = np.load(cache / "episode.npy")
+    tgt = (action - state) if delta_target else action
+
+    eps = np.unique(ep) if episodes is None else np.asarray(episodes)
+    curves = []
+    for e in eps:
+        i = np.where(ep == e)[0]
+        if len(i) < 4:
+            continue
+        y = tgt[i]
+        src = np.linspace(0.0, 1.0, len(y))
+        dst = np.linspace(0.0, 1.0, grid)
+        curves.append(np.stack([np.interp(dst, src, y[:, d])
+                                for d in range(y.shape[1])], axis=1))
+    if not curves:
+        raise ValueError("no episodes long enough to build a phase template")
+    return np.mean(curves, axis=0).astype(np.float32)
+
+
+def phase_of_frames(episode: np.ndarray) -> np.ndarray:
+    """Per-frame position within its episode, in [0, 1]."""
+    phase = np.zeros(len(episode), dtype=np.float32)
+    for e in np.unique(episode):
+        i = np.where(episode == e)[0]
+        phase[i] = np.linspace(0.0, 1.0, len(i), dtype=np.float32)
+    return phase
 
 
 def split_episodes(cache_dir: str, val_frac: float = 0.1, seed: int = 0):

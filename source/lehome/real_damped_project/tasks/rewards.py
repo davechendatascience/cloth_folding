@@ -60,6 +60,33 @@ class LyapunovRewardCfg:
     """EE velocity penalty (physical damping)."""
     lambda_delta_a: float = 0.01
     """Action-change penalty (action-space damping)."""
+    damping_gate: str = "always"
+    """Where the damping penalties ``r_vel`` and ``r_act`` apply.
+
+    ``"always"`` is the spec as written, and it is measurably harmful during
+    exploration: both terms are zero when the arm is stationary, so *doing
+    nothing* scores better than searching. Measured on the mock task,
+    freeze = -538 vs explore = -664 -- "stand still" is a local optimum the
+    policy will find and stay in.
+
+    The convergence argument does not require this. Monotone descent only has
+    to hold *eventually*, so damping is needed in the near-goal band where the
+    policy is regulating, not far away where it is still discovering what to
+    do. Critical damping is the efficient frontier for regulation; under-damping
+    is what exploration is.
+
+    ``"near"``   -- apply only inside the same near-goal band that gates
+                    ``r_mono``. Sharp, and exactly matches where the monotone
+                    requirement bites.
+    ``"smooth"`` -- scale by ``exp(-J / j_anneal)``, so damping fades in
+                    continuously as the garment approaches folded. Avoids a
+                    discontinuity in the reward at the band edge, which a value
+                    function has to model.
+    """
+    j_anneal: float = 1.0
+    """Scale for ``damping_gate="smooth"``. Damping reaches ~37% of full
+    strength at ``J = j_anneal``. Set it near the J at which the policy should
+    stop exploring and start regulating."""
     near_gate: str = "prev"
     """Which J gates the near-goal region: ``"prev"`` (Sec. 2.3), ``"next"``
     (earlier spec), or ``"either"`` (gate if either side is near)."""
@@ -93,6 +120,11 @@ class LyapunovRewardCfg:
         for name in ("lambda_up", "lambda_down", "lambda_v", "lambda_delta_a"):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must be >= 0")
+        if self.damping_gate not in ("always", "near", "smooth"):
+            raise ValueError(
+                f"damping_gate must be always|near|smooth, got {self.damping_gate!r}")
+        if self.j_anneal <= 0.0:
+            raise ValueError("j_anneal must be > 0")
         if self.near_gate not in ("prev", "next", "either"):
             raise ValueError(f"near_gate must be prev|next|either, got {self.near_gate!r}")
         if self.mono_mode not in ("proportional", "constant"):
@@ -215,10 +247,21 @@ class LyapunovDescentReward:
 
         # --- damping terms --------------------------------------------------
         vel_norm = torch.linalg.vector_norm(ee_vel.flatten(1), dim=-1)
-        r_vel = -c.lambda_v * vel_norm
-
         delta_a = action - self.prev_action
-        r_act = -c.lambda_delta_a * torch.linalg.vector_norm(delta_a, dim=-1)
+        act_norm = torch.linalg.vector_norm(delta_a, dim=-1)
+
+        # Damping is a *regulation* cost, so gate it on proximity to the goal.
+        # Applied globally it makes standing still the best available action
+        # before the policy has found anything worth doing.
+        if c.damping_gate == "near":
+            gate = near.to(j.dtype)
+        elif c.damping_gate == "smooth":
+            gate = torch.exp(-j.clamp_min(0.0) / c.j_anneal)
+        else:
+            gate = torch.ones_like(j)
+
+        r_vel = -c.lambda_v * vel_norm * gate
+        r_act = -c.lambda_delta_a * act_norm * gate
 
         reward = r_task + r_mono + r_vel + r_act
 
@@ -238,6 +281,7 @@ class LyapunovDescentReward:
             # rather than re-deriving them and mis-handling the first step of an
             # episode (where dJ is undefined).
             "near_mask": near,
+            "damping_gate": gate,
             "mono_violation": inc,
             "ee_speed": vel_norm,
         }

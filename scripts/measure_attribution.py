@@ -109,7 +109,12 @@ with torch.no_grad():
         if bi >= args.batches:
             break
         img, prop = batch[0].to(device), batch[1].to(device)
-        J = batch[-1].to(device) if ds.dJ is not None and len(batch) > 3 else None
+        # The dataset yields (img, prop, target, J, dJ). The auxiliary head is
+        # trained against J, so index 3 -- batch[-1] is dJ, and scoring J
+        # predictions against dJ produces a meaninglessly huge negative R^2
+        # (measured -10736) that looks like a broken model rather than a
+        # mis-indexed metric.
+        J = batch[3].to(device) if len(batch) >= 5 else None
 
         want_j = policy.j_head is not None
         if want_j:
