@@ -146,6 +146,16 @@ class IsaacGarmentCfg:
     """Per-joint actuator damping, ``{joint_name: D}``. ``None`` uses
     :data:`MEASURED_CRITICAL_DAMPING`; pass ``{}`` to keep LeHome's values.
 
+    **For anything involving the demonstrations, pass ``{}``.** Measured on the
+    one replay episode that failed under critical damping: keeping LeHome's
+    original under-damped gains took J from 2.200 to 0.211 (final) and 1.436 to
+    0.166 (best) -- 10x better on identical actions and an identical initial
+    pose. Demonstrated joint targets implicitly encode the response of the
+    plant they were recorded on, and open-loop replay has no feedback to absorb
+    a changed one. Behaviour cloning inherits that dependence, so evaluating or
+    finetuning a BC policy on the critically-damped plant scores it on a plant
+    it has never seen.
+
     Must be per-joint, not a scalar. Gains are uniform (K=17.8, D=0.60) but
     inertia varies 4x across the arm (0.0056-0.0231 kg m^2), and zeta ~
     1/sqrt(J), so one global value cannot suit all joints: D=1.283 would put
