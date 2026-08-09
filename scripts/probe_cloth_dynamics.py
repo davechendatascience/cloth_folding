@@ -37,6 +37,8 @@ import numpy as np
 p = argparse.ArgumentParser()
 p.add_argument("--cache", required=True)
 p.add_argument("--cp", default="checkpoints_cp.npy")
+p.add_argument("--ee", default=None,
+               help="ee_pos*.npy from the same replay. Enables grasp-centric\n                    features: the action expressed in CLOTH space rather than\n                    joint space.")
 p.add_argument("--horizon", type=int, default=1, help="predict p_{t+h} - p_t")
 p.add_argument("--val_frac", type=float, default=0.3)
 p.add_argument("--ridge", type=float, default=1e-3)
@@ -53,6 +55,7 @@ CP = np.load(cache / args.cp).astype(np.float64)      # (N, 6, 3) cm
 act = np.load(cache / "action.npy").astype(np.float64)   # (N, 12) joint targets
 st = np.load(cache / "state.npy").astype(np.float64)     # (N, 12) joint positions
 ep = np.load(cache / "episode.npy")
+EEW = np.load(cache / args.ee).astype(np.float64) * 100.0 if args.ee else None  # m -> cm
 
 ok = np.isfinite(CP).all(axis=(1, 2))
 eps = np.array(sorted({int(e) for e in np.unique(ep[ok])
@@ -90,6 +93,29 @@ for e in eps:
         "a": A_[:-h],
         "a-s": A_[:-h] - S_[:-h],
     }
+    if EEW is not None:
+        E_ = EEW[i]                                   # (T, 2, 3) cm
+        dee = np.zeros_like(E_)
+        dee[1:] = E_[1:] - E_[:-1]                    # gripper displacement
+        # Contact geometry: where each gripper sits relative to each
+        # check-point. This is what decides which cloth region an arm motion
+        # can affect, and it is a subtraction -- not something a model should
+        # have to infer from joint angles.
+        rel = P_[:, None, :, :] - E_[:, :, None, :]   # (T, 2, n_cp, 3)
+        dist = np.linalg.norm(rel, axis=-1)           # (T, 2, n_cp)
+        # Contact kernel: a gripper moves nearby cloth and not distant cloth.
+        # Handing the model prox * dee is handing it the contact model, rather
+        # than asking it to rediscover an inverse-distance law from data.
+        prox = 1.0 / (1.0 + (dist / 5.0) ** 2)        # 5 cm length scale
+        contact_act = (prox[..., None] * dee[:, :, None, :])   # (T, 2, n_cp, 3)
+        blocks.update({
+            "ee": E_[:-h].reshape(n, -1),
+            "dee": dee[:-h].reshape(n, -1),
+            "rel": rel[:-h].reshape(n, -1),
+            "prox": prox[:-h].reshape(n, -1),
+            "contact_act": contact_act[:-h].reshape(n, -1),
+            "grip": np.stack([S_[:-h, 5], S_[:-h, 11]], axis=-1),
+        })
     feats = np.concatenate([blocks[k] for k in ("p", "vel", "s", "a", "a-s")], axis=1)
     BLOCKS.append(blocks)
     # CAUSAL velocity extrapolation. The obvious "prev = dp[t-1]" leaks the
@@ -163,12 +189,19 @@ print(f"  improvement over it            : {gain:+.4f}")
 if args.ablate:
     cat = {k: np.concatenate([b[k] for b in BLOCKS]) for k in BLOCKS[0]}
     sets = [
-        ("cloth only        (p, vel)", ("p", "vel")),
-        ("+ arm pose        (p, vel, s)", ("p", "vel", "s")),
-        ("+ action          (p, vel, s, a)", ("p", "vel", "s", "a")),
-        ("+ action delta    (full)", ("p", "vel", "s", "a", "a-s")),
-        ("action only       (s, a, a-s)", ("s", "a", "a-s")),
+        ("cloth only          (p, vel)", ("p", "vel")),
+        ("JOINT SPACE  + s, a, a-s", ("p", "vel", "s", "a", "a-s")),
     ]
+    if EEW is not None:
+        sets += [
+            ("CLOTH SPACE  + ee, dee", ("p", "vel", "ee", "dee")),
+            ("             + contact geom (rel)", ("p", "vel", "ee", "dee", "rel")),
+            ("             + contact kernel", ("p", "vel", "ee", "dee", "rel",
+                                               "prox", "contact_act")),
+            ("             + grip state (full)", ("p", "vel", "ee", "dee", "rel",
+                                                  "prox", "contact_act", "grip")),
+            ("contact kernel ALONE", ("contact_act",)),
+        ]
     print("\n=== ablation: what does the ACTION contribute? ===")
     print(f"{'feature set':<36}{'MSE':>11}{'vs cloth-only':>15}")
     print("-" * 62)

@@ -102,7 +102,14 @@ try:
         "" if args.num_shards == 1 else f"_shard{args.shard}")
     jf_path, df_path = cache / f"J{sfx}.npy", cache / f"J_done{sfx}.npy"
     cp_path = cache / f"checkpoints{sfx}.npy"
+    ee_path = cache / f"ee_pos{sfx}.npy"
     CP = None  # lazily allocated: the check-point count is garment-dependent
+    # End-effector positions in world frame. Needed to express the action in
+    # CLOTH space rather than joint space: the model should be told where the
+    # gripper is, not made to rediscover forward kinematics from joint angles.
+    # Taken from Isaac rather than the URDF, which disagrees with the sim by
+    # 0.4 m (see LEVERS.md).
+    EE = np.full((n, 2, 3), np.nan, dtype=np.float32)
     J = np.full(n, np.nan, dtype=np.float32)
     done = np.zeros(0, dtype=np.int64)
     if jf_path.exists() and df_path.exists():
@@ -160,6 +167,9 @@ try:
                         if prev.shape == CP.shape:
                             CP = prev
                 CP[rows[i]] = pos
+                EE[rows[i]] = np.stack([
+                    backend._ee_pos_w(a)[0].detach().cpu().numpy() for a in (0, 1)
+                ])
                 # J is a function of exactly these positions, so compute it from
                 # the same read rather than stepping the functional twice.
                 J[rows[i]] = float(backend.functional(
@@ -172,6 +182,7 @@ try:
         np.save(df_path, done)
         if CP is not None:
             np.save(cp_path, CP)
+            np.save(ee_path, EE)
 
         span = J[rows]
         rate = (k + 1) / max(time.time() - t0, 1e-9)
