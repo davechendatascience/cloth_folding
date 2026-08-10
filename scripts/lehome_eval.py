@@ -51,4 +51,12 @@ if __name__ == "__main__":
 
     from scripts.eval import main
 
+    # Optional vision ablation, controlled by LEHOME_ABLATE. Import order
+    # matters: scripts.eval must be imported first so the stock policies are
+    # registered, and install() then replaces the `lerobot` entry. With the
+    # variable unset this is a no-op and the official path runs untouched.
+    import ablate_vision
+
+    ablate_vision.install()
+
     main()

@@ -431,3 +431,42 @@ is 24 episodes and takes ~45 min alongside a training job. Garment placement is
 randomised by `env.reset()` + `stabilize_garment_after_reset`, *not* taken from
 demo poses; that is correct for measuring a policy, unlike demo replay, where
 per-episode pose is mandatory.
+
+### Why success > 0 is not evidence of vision, and the ablation that settles it
+
+Checked the eval's actual reset ranges rather than assuming randomised
+placement, and the protocol is much weaker than it reads:
+
+```yaml
+soft_reset_pos_range: [-0.04, -0.05, 0.73,  -0.04, -0.05, 0.73]   # min == max
+soft_reset_rot_range: [-20,   -36,   0,      20,    36,    0]
+```
+
+Sampling is `uniform(range[i], range[i+3])` per axis, so:
+
+- **garment position is not randomised at all** — identical every episode; the
+  env even computes `pos_range_valid = (pos[0] != pos[3] or ...)`, false here
+- only orientation varies: roll ±20°, pitch ±36°, **yaw fixed at 0**
+- `texture_randomization.enable: False`, `light_randomization.enable: False`
+- `seed 42` with `use_random_seed False`, and **10 of the 12 eval garments are
+  in the training set** (`Seen_0..9` train; eval adds `Unseen_0/1`)
+
+A policy that ignores the cameras therefore gets the garment's location for
+free and only has to absorb tilt. Combined with demos that are ~69% predictable
+from phase alone (phase → action R² 0.688; proprioception only reaches 0.725,
+i.e. +0.037 over a bare clock), and `n_action_steps=50` meaning the model
+observes just 12 times per 600-step episode, a phase template has a real path to
+partial success without perception.
+
+So an unablated success rate cannot distinguish a policy that sees from one that
+counts. `scripts/ablate_vision.py` supplies the control: `LEHOME_ABLATE=frozen`
+holds each episode's first frame for its whole duration — in-distribution
+imagery carrying no state information — and `blank` zeroes the images (decisive
+but out-of-distribution, so read it only next to `frozen`). It swaps the class
+registered under `lerobot` so the official parser, its
+`policy_type == "lerobot"` kwargs branch, and `main()` are all untouched.
+
+Report **Seen and Unseen separately** (`parse_eval.py`). The harness pools all
+12 garments, which is 83% in-distribution; only `Unseen_0/1` speak to
+generalisation, and at `--num_episodes 2` that is 4 episodes — which cannot
+separate 25% from 50%. Never quote the pooled number alone.

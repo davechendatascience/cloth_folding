@@ -11,8 +11,13 @@
 # preloaded too or it dies on static TLS, and CWD must be the lehome-challenge
 # checkout because garment USDs resolve relative to it.
 #
-# The simulator runs on CPU (`--device cpu`, as their docs recommend) so it does
-# not contend with a training job for the GPU; the policy still loads to CUDA.
+# DEVIATION: their docs suggest `--device cpu`, but that recommendation is
+# explicitly about "GUI conflicts in some environments" -- we run headless, so it
+# does not apply. `--device cpu` was tried here and crashed shortly after policy
+# load (Isaac raised a zenity dialog, then shut down at 166 s); `--device cuda`
+# is verified working end-to-end (8 garments / 14 episodes). Cost: the eval
+# contends with a concurrent training job for the GPU, worth about 40% of
+# training throughput while it runs.
 set -euo pipefail
 
 REPO=/home/edge-host/Documents/GitHub/cloth_folding
