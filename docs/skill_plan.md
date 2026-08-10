@@ -115,6 +115,52 @@ not a skill; it is inactivity.
 
 ---
 
+## 4b. Profiling result (2026-08-10): none of the candidates are skills
+
+60 randomised states per primitive, identical states across primitives, critical
+damping, `noop` as the floor.
+
+| prim | held% | disp (± sd) | cloth cm | σ above floor | dJ | sd(dJ) |
+|---|---|---|---|---|---|---|
+| noop | 0% | 0.00 | 0.42 | — | +0.105 | 0.105 |
+| push | 17% | 0.66 ± 0.77 | 0.48 | +0.50 | +0.062 | 0.173 |
+| r_lift | 5% | 0.70 ± 1.06 | 0.71 | +1.79 | +0.018 | 0.408 |
+| r_drag | **20%** | 1.28 ± 1.75 | 0.72 | +1.86 | +0.029 | 0.264 |
+| r_fold | 0% | 1.73 ± 4.44 | **0.89** | +2.7 | +0.006 | 0.350 |
+
+Three findings, and they agree:
+
+- **No primitive reduces J.** Every `dJ` is positive; the best merely fails to
+  make things worse. Nothing makes task progress.
+- **Grasps do not hold.** Best 20%. `r_fold`, which moves the cloth most, holds
+  **0%** — its displacement is shoving, not carrying.
+- **Variance exceeds the effect.** `r_fold` displaces 1.73 ± 4.44 cm. sd(dJ)
+  rises from 0.105 (noop) to 0.26–0.41. These are *less* invariant than doing
+  nothing.
+
+Retrieval was a real improvement over DLS IK — `r_lift` +1.79 σ vs `lift`
++0.58 σ, contact in 52% of states vs 33%, and dJ degradation cut from +0.091 to
++0.018 — so the posture diagnosis was correct. It was simply not sufficient.
+Friction-based grasping here is too weak for single-arm grasp-and-carry.
+
+**Methodological note.** The coefficient of variation was the intended
+invariance metric and it is useless here: it divides by mean `dJ`, which is near
+zero for every primitive, so it explodes (22.7, 61.0) without indicating
+anything. It presumed primitives would produce a clear mean effect to normalise
+against. Read **sd(dJ)** directly instead. Designing the metric before knowing
+whether the effect exists was the error.
+
+**What this implies.** The demonstrations *do* fold this cloth, so the capability
+exists in this simulator. What they have is not a better grasp posture — we now
+retrieve theirs — but sustained **bimanual coordination over long horizons**: a
+demo fold is ~330 steps with both arms, our primitives are single-arm and ~24.
+
+The skill unit is therefore wrong. Rather than synthesising primitives from
+grasp postures, **retrieve and replay demo trajectory segments** — the
+granularity at which the demonstrations demonstrably work. That keeps what has
+repeatedly proven reliable (recorded demo behaviour) and drops what keeps
+failing (reconstructing manipulation from parts).
+
 ## 5. Sequence after profiling
 
 1. **Invariance profile** → skill library, and a map of where perception matters

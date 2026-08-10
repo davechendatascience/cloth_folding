@@ -56,6 +56,11 @@ p.add_argument("--gripper_offset", type=float, default=0.09)
 p.add_argument("--contact_r", type=float, default=13.0)
 p.add_argument("--track_tol", type=float, default=0.4)
 p.add_argument("--save_every", type=int, default=5)
+p.add_argument("--grasp_library", default=None,
+               help="grasp_library.npz. When given, grasp POSTURE is retrieved from "
+                    "demonstrations instead of solved by DLS IK. Our IK grasp held "
+                    "0/60; the demos hold constantly, and the difference is a ~30 deg "
+                    "wrist rotation the 5-DOF arm cannot be commanded into.")
 p.add_argument("--seed", type=int, default=0)
 args = p.parse_args()
 
@@ -114,6 +119,63 @@ try:
             track.append(held)
             prev_cp, prev_ee = cur_cp, cur_ee
         return np.array(track)          # (steps, n_cp)
+
+    # ---- grasp posture: retrieved, not solved --------------------------------
+    RETR = None
+    if args.grasp_library:
+        from lehome.real_damped_project.control.grasp_retrieval import GraspRetriever
+        RETR = GraspRetriever(args.grasp_library)
+        print(f"[grasp] retrieval from {len(RETR.q)} demonstrated configurations", flush=True)
+
+    def retrieved_grasp(p_cm, arm, hold_steps=6):
+        """Drive to a demonstrated grasp posture for a cloth point.
+
+        Returns False when the target is outside the demonstrated manifold --
+        abstaining rather than inventing a pose, which is exactly what the DLS
+        solver failed to do.
+        """
+        want = p_cm + np.array([0.0, 0.0, 9.9])      # measured body-to-point gap
+        res = RETR.query(want, arm)
+        if res is None:
+            return False
+        q_des, grip, _ = res
+        # Approach through the same posture held higher, so the wrist arrives
+        # already oriented rather than rotating into place against the cloth.
+        pre = RETR.query(want + np.array([0.0, 0.0, 6.0]), arm)
+        # Two staged postures: hover, then descend. Joint targets are position
+        # commands, so holding each for a number of steps lets the impedance
+        # controller settle into it -- no interpolation needed, and the wrist
+        # arrives already oriented rather than rotating against the cloth.
+        for q_stage, n in ((pre[0] if pre else q_des, 12), (q_des, 12)):
+            tgt = torch.as_tensor(q_stage, dtype=torch.float32)
+            for _ in range(n):
+                backend.set_joint_targets(tgt)
+                backend.simulate()
+        for _ in range(hold_steps):
+            backend.set_joint_targets(torch.as_tensor(q_des, dtype=torch.float32))
+            backend.simulate()
+        return True
+
+    def retrieved_move(p_from_cm, p_to_cm, arm, steps=24):
+        """Carry a grasped point toward a target, staying on the demo manifold."""
+        track = []
+        prev_cp, prev_ee = cps(), ees()
+        for k in range(steps):
+            a = (k + 1) / steps
+            want = (1 - a) * p_from_cm + a * p_to_cm + np.array([0.0, 0.0, 9.9])
+            res = RETR.query(want, arm)
+            if res is None:
+                break
+            backend.set_joint_targets(torch.as_tensor(res[0], dtype=torch.float32))
+            backend.simulate()
+            cur_cp, cur_ee = cps(), ees()
+            d = np.linalg.norm(cur_cp - cur_ee[arm], axis=-1)
+            dcp = cur_cp - prev_cp
+            dee = cur_ee[arm] - prev_ee[arm]
+            track.append((np.linalg.norm(dcp - dee[None], axis=-1) < args.track_tol)
+                         & (d < args.contact_r))
+            prev_cp, prev_ee = cur_cp, cur_ee
+        return np.array(track) if track else np.zeros((1, n_cp), dtype=bool)
 
     # ---- the candidate primitives -------------------------------------------
     # Each takes the settled cloth state and returns (name, executor). Executors
@@ -195,8 +257,30 @@ try:
             return move_to(tgt + np.array([dx, dy, 0.0], np.float32), arm, 0.6, 28), cp
         return run
 
-    PRIMS = [("noop", prim_noop), ("lift", prim_lift), ("drag", prim_drag),
-             ("fold", prim_fold), ("push", prim_push)]
+    def _retr_prim(kind):
+        def factory(p0, rng_):
+            cp, arm = _reachable_cp(p0)
+            if kind == "lift":
+                goal = p0[cp] + np.array([0, 0, 8.0], dtype=np.float32)
+            elif kind == "drag":
+                goal = p0[cp] + np.array([rng_.uniform(-8, 8), rng_.uniform(-8, 8), 1.0],
+                                         dtype=np.float32)
+            else:                                    # fold toward the centroid
+                c = p0.mean(axis=0)
+                goal = np.array([c[0], c[1], p0[cp, 2] + 4.0], dtype=np.float32)
+            def run():
+                if not retrieved_grasp(p0[cp], arm):
+                    return np.zeros((1, n_cp), dtype=bool), cp
+                return retrieved_move(p0[cp], goal, arm), cp
+            return run
+        return factory
+
+    PRIMS = [("noop", prim_noop), ("push", prim_push)]
+    if RETR is not None:
+        PRIMS += [("r_lift", _retr_prim("lift")), ("r_drag", _retr_prim("drag")),
+                  ("r_fold", _retr_prim("fold"))]
+    else:
+        PRIMS += [("lift", prim_lift), ("drag", prim_drag), ("fold", prim_fold)]
 
     rows = []
     t0 = time.time()
