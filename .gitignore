@@ -9,3 +9,4 @@ logs/
 outputs/
 data/perception_v1/
 data/*/images.u8
+data/grasp_library/
