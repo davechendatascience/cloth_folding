@@ -226,6 +226,12 @@ def main(argv=None):
             prior_kl_coef=args.prior_kl_coef,
             entropy_coef=args.entropy_coef,
             polyak_tau=args.polyak_tau,
+            # PPOCfg already clamps the adaptive schedule to lr_max in
+            # _adapt_lr, which rewrites optimizer.param_groups from self.lr
+            # on every update -- so a post-hoc cap on param_groups is
+            # silently overwritten (measured: lr reached 5.13e-04 against a
+            # requested cap of 3e-5). Feed the existing mechanism instead.
+            **({"lr_max": args.lr_max} if args.lr_max > 0.0 else {}),
         ),
         device=args.policy_device,
     )
@@ -246,9 +252,6 @@ def main(argv=None):
             if runner.agent.refresh_prior():
                 print(f"        re-anchored KL prior at mean={watchdog.best_mean:.4f}",
                       flush=True)
-        if args.lr_max > 0.0:
-            for g in runner.agent.optimizer.param_groups:
-                g["lr"] = min(g["lr"], args.lr_max)
         history.append({**stats, "verdict": verdict.value})
         print(f"[{it+1:4d}] J={stats['J_mean']:8.4f} R={stats['reward_mean']:8.4f} "
               f"mono_viol={stats['mono_violation_rate']:.3f} kl={stats['kl']:.4f} "
