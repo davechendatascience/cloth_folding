@@ -115,6 +115,11 @@ def parse_args(argv=None):
                         "stationary, so doing nothing scored -538 against -664 for "
                         "exploring. The convergence argument only needs monotone "
                         "descent EVENTUALLY, so damping belongs near the goal.")
+    p.add_argument("--ckpt_every", type=int, default=25,
+                   help="Save every N iterations. Without this a multi-hour run has "
+                        "nothing to inspect until it ends and loses everything on a "
+                        "crash -- the same gap that cost 270 poses in the perception "
+                        "collector.")
     p.add_argument("--init_log_std", type=float, default=-1.0,
                    help="Exploration scale for a reinitialised actor. BC trains this "
                         "to -3.20 (sigma 0.041 rad) fitting a deterministic template; "
@@ -227,6 +232,17 @@ def main(argv=None):
         print(f"[{it+1:4d}] J={stats['J_mean']:8.4f} R={stats['reward_mean']:8.4f} "
               f"mono_viol={stats['mono_violation_rate']:.3f} kl={stats['kl']:.4f} "
               f"| {verdict.value} {watchdog.report()}", flush=True)
+        # ge-terms are the collapse detector: if they dominate, the policy is
+        # bunching the cloth rather than folding it.
+        ge = sum(v for k, v in stats.items() if k.startswith("J_c") and "_ge_" in k)
+        le = sum(v for k, v in stats.items() if k.startswith("J_c") and "_le_" in k)
+        if ge or le:
+            print(f"        J split: le={le:.3f} ge={ge:.3f} "
+                  f"{'<- COLLAPSE (ge dominates)' if ge > 2 * max(le, 1e-6) else ''}",
+                  flush=True)
+        if args.ckpt_every and (it + 1) % args.ckpt_every == 0:
+            runner.save(str(out / f"iter_{it+1:05d}.pt"))
+            (out / "history.json").write_text(json.dumps(history, indent=2))
 
         if verdict in (Verdict.NAN, Verdict.DIVERGED):
             print(f"[abort] {verdict.value}: " + "; ".join(watchdog.alerts[-2:]), flush=True)

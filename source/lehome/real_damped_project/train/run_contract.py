@@ -173,6 +173,16 @@ class Watchdog:
         self.values: List[float] = []
         self.best: Optional[float] = None
         self.best_eval = -1
+        # Running mean is what the baseline comparison uses. Tracking the BEST
+        # is one-sided: the run draws hundreds of samples from a chaotic
+        # simulator and keeps the minimum, while the baseline was measured once.
+        # Observed live: a run whose current J was 7.43 -- no better than its
+        # start -- reported "BEATS baseline" on the strength of a single lucky
+        # evaluation 46 evals earlier. Replay variance here is large (identical
+        # replays of one episode gave 1.770 / 1.062 / 2.214), so best-of-N will
+        # drift downward by luck alone.
+        self.best_mean: Optional[float] = None
+        self.best_mean_eval = -1
         self.last_update = clock()
         self.alerts: List[str] = []
 
@@ -206,6 +216,13 @@ class Watchdog:
             self.best, self.best_eval = v, len(self.values) - 1
 
         n = len(self.values)
+        # Progress is judged on the running mean over one trend window, which
+        # is noise-symmetric: the baseline is a mean too.
+        w = max(self.c.trend_window, 1)
+        if n >= w:
+            m = sum(self.values[-w:]) / w
+            if self.best_mean is None or self._better(m, self.best_mean):
+                self.best_mean, self.best_mean_eval = m, n - 1
 
         # Divergence is checked immediately: it is a failure, not a conclusion,
         # and waiting for min_evals would waste the very time this exists to save.
@@ -219,6 +236,10 @@ class Watchdog:
                 )
                 return Verdict.DIVERGED
 
+        # SUCCESS stays on the single value. The threshold here is LeHome's own
+        # predicate (J == 0), and folding the garment once is a real achievement
+        # rather than a claim about a trend -- unlike the baseline comparison
+        # and the plateau clock below, which must be noise-symmetric.
         if self.c.success_threshold is not None and self._better(
             v, self.c.success_threshold
         ):
@@ -228,7 +249,10 @@ class Watchdog:
         if n < self.c.min_evals_before_verdict:
             return Verdict.PENDING
 
-        if n - 1 - self.best_eval >= self.c.patience_evals:
+        # Plateau against the running mean: a lucky single evaluation should
+        # not reset the patience clock.
+        anchor = self.best_mean_eval if self.best_mean is not None else self.best_eval
+        if n - 1 - anchor >= self.c.patience_evals:
             return Verdict.PLATEAU
 
         return Verdict.ON_TRACK
@@ -287,16 +311,20 @@ class Watchdog:
         if self.best is None:
             return f"evals=0 best=n/a trend=n/a (no data)"
 
-        rel = self.relative(self.best)
+        rel = self.relative(self.best_mean if self.best_mean is not None else self.best)
         if rel is None:
-            head = f"best={self.best:.4g} (NO BASELINE -- uninterpretable)"
+            head = (f"mean={self.best_mean:.4g} (NO BASELINE -- uninterpretable)"
+                    if self.best_mean is not None
+                    else f"best={self.best:.4g} (NO BASELINE -- uninterpretable)")
         else:
             beats = "BEATS" if rel < 1.0 else "worse than"
             head = (
-                f"best/{self.c.must_beat_baseline}={rel:.3f} [{beats} baseline] "
-                f"(abs={self.best:.4g})"
+                f"{'mean' if self.best_mean is not None else 'best'}/"
+                f"{self.c.must_beat_baseline}={rel:.3f} [{beats} baseline] "
+                + (f"(mean={self.best_mean:.4g}, best={self.best:.4g})"
+                   if self.best_mean is not None else f"(abs={self.best:.4g})")
             )
         return (
-            f"{head} evals={n} @{self.best_eval} "
+            f"{head} evals={n} @{self.best_mean_eval if self.best_mean is not None else self.best_eval} "
             f"trend={'n/a' if t is None else f'{t:+.4g}'}"
         )

@@ -136,11 +136,37 @@ def test_the_actual_divergence_that_happened():
 
 
 def test_plateau_after_patience():
-    w = Watchdog(contract(min_evals_before_verdict=3, patience_evals=4))
+    """Plateau is measured from the last improvement in the RUNNING MEAN.
+
+    Not from the best single evaluation: with a chaotic simulator one lucky draw
+    would reset the patience clock indefinitely. Observed live -- a run whose
+    current J was 7.43, no better than its start, still reported progress on the
+    strength of one evaluation 46 evals earlier.
+
+    The cost is that plateau cannot fire until enough evaluations exist to form
+    a mean (trend_window), so detection is later than a best-based clock. That
+    is the intended trade: slower, but not fooled by noise.
+    """
+    w = Watchdog(contract(min_evals_before_verdict=3, patience_evals=4,
+                          trend_window=2))
     w.update({"J": 5.0})
-    for _ in range(6):
+    v = None
+    for _ in range(10):
         v = w.update({"J": 6.0})
     assert v is Verdict.PLATEAU
+
+
+def test_plateau_is_not_reset_by_one_lucky_evaluation():
+    """The failure this change exists to prevent."""
+    w = Watchdog(contract(min_evals_before_verdict=3, patience_evals=4,
+                          trend_window=2))
+    for _ in range(6):
+        w.update({"J": 6.0})
+    w.update({"J": 0.5})          # one lucky draw, immediately lost again
+    v = None
+    for _ in range(8):
+        v = w.update({"J": 6.0})
+    assert v is Verdict.PLATEAU, "a single outlier must not reset the patience clock"
 
 
 def test_success_is_reported_when_threshold_met():

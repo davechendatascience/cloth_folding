@@ -186,7 +186,24 @@ class LeHomeFoldGarmentRealDampedEnv:
         j = self.backend.compute_cloth_error().to(self.device)
         ee_vel = self.backend.get_end_effector_velocities().to(self.device)
 
+        # Per-condition decomposition, because the scalar J is exploitable.
+        # Measured: crumpling the garment into a ball zeroes all three "must be
+        # close" terms and pays only the two "must stay apart" ones, taking J
+        # from 8.685 to 1.186 -- 86% of the range without folding anything. A
+        # genuine fold keeps the ge-terms small; a collapse makes them dominate,
+        # so the split is what distinguishes progress from reward hacking.
+        j_comps = {}
+        try:
+            pts = self.backend.check_point_positions_cm()
+            _, comps = self.backend.functional(pts, return_components=True)
+            for k, v in comps.items():
+                if "dist" not in k:
+                    j_comps[f"J_{k}"] = float(torch.as_tensor(v).mean())
+        except Exception:
+            pass
+
         rewards, components = self.reward_fn.compute(j, ee_vel, self._pending_action)
+        components.update({k: torch.as_tensor(v, device=self.device) for k, v in j_comps.items()})
         self.prev_action = self._pending_action.clone()
         self.episode_reward += rewards
 
