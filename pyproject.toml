@@ -19,6 +19,21 @@ dependencies = [
 #
 # torchcodec is required because torchvision 0.28 removed io.VideoReader, and
 # lerobot's "pyav" backend routes through that same removed call.
+#
+# Run pi0 finetuning in bf16 with gradient checkpointing. LeRobot defaults to
+# float32, which for 3.5B parameters is ~14GB weights + 14GB grads + 28GB Adam
+# state before a single activation. On GB10 there is no separate VRAM -- model,
+# activations and dataloader share one 121GB pool with the OS -- and fp32 at
+# batch 4 left 1GB free with 8.7GB spilled to swap. Measured:
+#
+#   fp32               92/121GB used,  1GB free, 3.71 s/step
+#   bf16 + grad ckpt   51/121GB used, 38GB free, 2.71 s/step
+#
+# The bf16 run is also 27% FASTER, not slower: gradient checkpointing normally
+# costs ~30% in recomputation, but here the memory relief outweighs it, which
+# says the fp32 run was already paying for swap traffic.
+#
+#   --policy.dtype=bfloat16 --policy.gradient_checkpointing=true
 [project.optional-dependencies]
 
 dev = ["pytest>=8"]
