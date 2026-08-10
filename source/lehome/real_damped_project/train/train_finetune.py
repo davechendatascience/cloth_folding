@@ -115,6 +115,18 @@ def parse_args(argv=None):
                         "stationary, so doing nothing scored -538 against -664 for "
                         "exploring. The convergence argument only needs monotone "
                         "descent EVENTUALLY, so damping belongs near the goal.")
+    p.add_argument("--lr_max", type=float, default=0.0,
+                   help="Cap on the adaptive learning rate (0 = uncapped). An "
+                        "adaptive schedule RAISES lr when KL comes in under target, "
+                        "which is anti-damping in a chaotic reward landscape: "
+                        "measured climbing 3e-5 -> 1.01e-4 while the policy overshot "
+                        "a good region and lost it.")
+    p.add_argument("--reanchor_on_best", action="store_true",
+                   help="Re-anchor the KL prior to the current policy whenever the "
+                        "running mean improves. This is damping on the POLICY "
+                        "trajectory: resist moving away from the best solution found, "
+                        "rather than from behaviour cloning (measured worse than a "
+                        "frozen arm) or from nothing at all.")
     p.add_argument("--ckpt_every", type=int, default=25,
                    help="Save every N iterations. Without this a multi-hour run has "
                         "nothing to inspect until it ends and loses everything on a "
@@ -227,7 +239,16 @@ def main(argv=None):
     history = []
     for it in range(args.iterations):
         stats = runner.train(max_iterations=1)[-1]
+        prev_best_mean = watchdog.best_mean
         verdict = watchdog.update({contract.primary_metric: stats["J_mean"], **stats})
+        if args.reanchor_on_best and watchdog.best_mean is not None \
+                and (prev_best_mean is None or watchdog.best_mean < prev_best_mean):
+            if runner.agent.refresh_prior():
+                print(f"        re-anchored KL prior at mean={watchdog.best_mean:.4f}",
+                      flush=True)
+        if args.lr_max > 0.0:
+            for g in runner.agent.optimizer.param_groups:
+                g["lr"] = min(g["lr"], args.lr_max)
         history.append({**stats, "verdict": verdict.value})
         print(f"[{it+1:4d}] J={stats['J_mean']:8.4f} R={stats['reward_mean']:8.4f} "
               f"mono_viol={stats['mono_violation_rate']:.3f} kl={stats['kl']:.4f} "

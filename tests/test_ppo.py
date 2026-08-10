@@ -295,3 +295,45 @@ def test_runner_checkpoint_roundtrip(runner, tmp_path):
     after = list(runner.policy.parameters())
     assert all(torch.allclose(a, b) for a, b in zip(before, after))
     assert runner.iteration == 1
+
+
+class TestPolicyTrajectoryDamping:
+    """Re-anchoring the KL prior is damping on the POLICY trajectory.
+
+    The run that motivated this held mean J at 2.1-2.6 for ~30 iterations and
+    then overshot back above 7.7 -- an under-damped trajectory oscillating out
+    of a basin it had already reached. The anchor is snapshotted once at
+    construction, so it held behaviour cloning (measured worse than a frozen
+    arm) rather than the best solution found.
+    """
+
+    def _runner(self, prior_coef):
+        from lehome.real_damped_project.train.ppo import DampedPPOAgent, PPOCfg
+        from lehome.real_damped_project.policy.vision_attention_policy import (
+            VisionAttentionPolicy)
+        pol = VisionAttentionPolicy(image_channels=3, proprio_dim=4, action_dim=2,
+                                    feature_dim=16, hidden_dim=16)
+        return DampedPPOAgent(pol, PPOCfg(prior_kl_coef=prior_coef), device="cpu")
+
+    def test_refresh_reports_false_when_anchoring_is_off(self):
+        r = self._runner(0.0)
+        assert r.refresh_prior() is False, (
+            "callers must be able to distinguish 're-anchored' from 'anchoring off'")
+
+    def test_refresh_moves_the_anchor_to_the_current_policy(self):
+        import torch
+        r = self._runner(0.1)
+        before = r.prior_policy.policy_head.weight.detach().clone()
+        with torch.no_grad():
+            r.policy.policy_head.weight.add_(1.0)
+        assert not torch.allclose(before, r.policy.policy_head.weight)
+        assert r.refresh_prior() is True
+        assert torch.allclose(r.prior_policy.policy_head.weight,
+                              r.policy.policy_head.weight), \
+            "the anchor must follow the policy it is meant to hold onto"
+
+    def test_anchor_stays_frozen_after_refresh(self):
+        r = self._runner(0.1)
+        r.refresh_prior()
+        assert all(not p.requires_grad for p in r.prior_policy.parameters()), \
+            "a trainable anchor would drift with the policy and damp nothing"

@@ -176,6 +176,32 @@ class RolloutBuffer:
 class DampedPPOAgent:
     """PPO with a KL trust region, prior anchoring, and Polyak averaging."""
 
+    def refresh_prior(self) -> bool:
+        """Re-anchor the KL prior to the CURRENT policy.
+
+        The anchor is snapshotted once at construction, which means it holds the
+        policy at whatever it was initialised from -- for us, behaviour cloning,
+        measured worse than a frozen arm. Anchoring there pulls the search toward
+        a policy we know is bad; anchoring nowhere (prior_kl_coef=0) removes the
+        damping term entirely.
+
+        Neither is what the design wants. Damping on the policy trajectory means
+        resisting movement away from a known-good solution, so the anchor should
+        track the best policy found so far. Observed without it: a run held mean
+        J at 2.1-2.6 for ~30 iterations and then overshot back above 7.7 -- an
+        under-damped trajectory oscillating out of a basin it had reached.
+
+        Returns False when no prior is configured, so callers can tell the
+        difference between "re-anchored" and "anchoring is off".
+        """
+        if self.prior_policy is None:
+            return False
+        self.prior_policy.load_state_dict(self.policy.state_dict())
+        self.prior_policy.eval()
+        for p in self.prior_policy.parameters():
+            p.requires_grad_(False)
+        return True
+
     def __init__(
         self,
         policy: nn.Module,
