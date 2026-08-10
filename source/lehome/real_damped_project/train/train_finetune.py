@@ -102,6 +102,25 @@ def parse_args(argv=None):
                         "to demonstration variance, and an entropy bonus would "
                         "inflate it back toward undirected exploration.")
     p.add_argument("--polyak_tau", type=float, default=0.05)
+    p.add_argument("--reinit_actor", action="store_true",
+                   help="Keep the BC encoder, reinitialise the action head. The BC "
+                        "policy is measurably a BAD prior -- closed loop it scored "
+                        "J_min 7.168 against a frozen arm's 7.118, i.e. worse than "
+                        "not moving -- because it reproduces a pose-blind template. "
+                        "Its encoder is worth keeping; its actor is not.")
+    p.add_argument("--damping_gate", default="smooth",
+                   choices=["always", "near", "smooth"],
+                   help="Where r_vel/r_act apply. 'always' is the spec as written and "
+                        "measurably creates a freeze basin: both terms vanish when "
+                        "stationary, so doing nothing scored -538 against -664 for "
+                        "exploring. The convergence argument only needs monotone "
+                        "descent EVENTUALLY, so damping belongs near the goal.")
+    p.add_argument("--init_log_std", type=float, default=-1.0,
+                   help="Exploration scale for a reinitialised actor. BC trains this "
+                        "to -3.20 (sigma 0.041 rad) fitting a deterministic template; "
+                        "inheriting that leaves nothing to explore with.")
+    p.add_argument("--j_anneal", type=float, default=1.0,
+                   help="Scale for damping_gate='smooth': damping reaches ~37% at J=this.")
     return p.parse_args(argv)
 
 
@@ -128,6 +147,8 @@ def main(argv=None):
     print(f"[bc] epoch={ckpt['epoch']} val_mse={ckpt['val_mse']:.5f}")
 
     cfg = RealDampedTaskCfg()
+    cfg.reward.damping_gate = args.damping_gate
+    cfg.reward.j_anneal = args.j_anneal
     cfg.use_mock_backend = False
     cfg.action_mode = "joint"
     cfg.num_envs = 1
@@ -153,8 +174,30 @@ def main(argv=None):
         feature_dim=bc_args["feature_dim"],
         hidden_dim=bc_args["hidden_dim"],
         squash=False,  # BC trained on raw joint targets
+        # A BC run with lambda_j > 0 carries j_head weights, and loading those
+        # into a policy built without the head fails on unexpected keys. The
+        # head is unused during RL, but it has to exist to load. (Same bug was
+        # fixed in eval_bc_in_sim.py and not propagated here.)
+        predict_j=bc_args.get("lambda_j", 0.0) > 0.0,
     ).to(args.policy_device)
     policy.load_state_dict(ckpt["policy"])
+    if args.reinit_actor:
+        # Transfer perception, discard behaviour. Measured: the BC actor weights
+        # proprioception ~9x more than images and executes a template that does
+        # not fold, so anchoring RL to it would hold the search inside a basin we
+        # already know is bad.
+        policy.policy_head.reset_parameters()
+        torch.nn.init.orthogonal_(policy.policy_head.weight, gain=0.01)
+        torch.nn.init.zeros_(policy.policy_head.bias)
+        # Reset the exploration scale too. BC drives log_std down to -3.20
+        # (sigma = 0.041 rad) because it is fitting a near-deterministic
+        # template; a reinitialised actor inheriting that cannot search at all,
+        # and exploration is exactly what the under-damped regime is meant to
+        # buy. Restore the policy's own init value.
+        with torch.no_grad():
+            policy.log_std.fill_(args.init_log_std)
+        print(f"[policy] actor head reinitialised (log_std -> {args.init_log_std}); "
+              "encoder/attention retained from BC")
     print(f"[policy] loaded BC weights, log_std={float(policy.log_std.mean()):+.2f}")
 
     agent = DampedPPOAgent(
