@@ -1,53 +1,29 @@
-"""Real-analysis-guided damped visual RL for LeHome cloth folding.
+"""LeHome cloth folding: evaluation objective and simulator access.
 
-Implements ``real_analysis_damped_cloth_folding_rl_spec.md``. Importing this
-package registers ``LeHome-Fold-Garment-RealDamped-v0``.
+The project now finetunes a pretrained VLA (pi0) via LeRobot rather than
+training a custom policy. What lives here is what survives that change and is
+still needed to *judge* a policy:
 
-Submodules are imported lazily so that ``import lehome.real_damped_project``
-does not pull in torch until something is actually used.
+* ``math.garment_functional`` -- J, whose zero set is LeHome's own success
+  predicate (verified over 300 configurations).
+* ``tasks.isaac_garment_backend`` -- the live garment environment.
+* ``tasks.isaac_app`` -- a guarded Isaac launcher (Kit ignores SIGTERM and
+  leaves a 300%-CPU orphan on any unguarded failure).
+
+The retired stack -- behaviour cloning, PPO with damped updates, the reward
+shaping, the mock backend, grasp retrieval -- is in git history. Its findings,
+which are the durable part, are in README.md, LEVERS.md and docs/.
 """
 
 from __future__ import annotations
 
-__all__ = [
-    "ClothErrorFunctional",
-    "ClothFunctionalCfg",
-    "DampedImpedanceController",
-    "LyapunovDescentReward",
-    "LyapunovRewardCfg",
-    "LeHomeFoldGarmentRealDampedEnv",
-    "VisionAttentionPolicy",
-    "build_lehome_real_damped_cfg",
-    "make_env",
-    "TASK_NAME",
-]
-
-__version__ = "0.1.0"
+__all__ = ["GarmentFoldFunctional", "GarmentFunctionalCfg", "GARMENT_CONDITIONS"]
+__version__ = "0.2.0"
 
 
 def __getattr__(name: str):
-    if name in ("ClothErrorFunctional", "ClothFunctionalCfg"):
-        from .math import cloth_functional as m
+    if name in __all__:
+        from . import math as m
 
         return getattr(m, name)
-    if name == "DampedImpedanceController":
-        from .control.impedance_controller import DampedImpedanceController
-
-        return DampedImpedanceController
-    if name in ("LyapunovDescentReward", "LyapunovRewardCfg"):
-        from .tasks import rewards as m
-
-        return getattr(m, name)
-    if name == "VisionAttentionPolicy":
-        from .policy.vision_attention_policy import VisionAttentionPolicy
-
-        return VisionAttentionPolicy
-    if name in ("build_lehome_real_damped_cfg", "make_env", "TASK_NAME"):
-        from .tasks import cfg as m
-
-        return getattr(m, name)
-    if name == "LeHomeFoldGarmentRealDampedEnv":
-        from .tasks.lehome_fold_garment_real_damped_task import LeHomeFoldGarmentRealDampedEnv
-
-        return LeHomeFoldGarmentRealDampedEnv
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

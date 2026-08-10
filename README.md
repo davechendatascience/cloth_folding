@@ -11,30 +11,34 @@ non-oscillatory convergence to a folded configuration.
 
 ## Status
 
-| Component | State |
+**The project now finetunes a pretrained VLA (pi0) via LeRobot.** The custom
+stack — behaviour cloning, damped PPO, reward shaping, grasp retrieval — was
+retired after measuring that it could not work here. It is in git history; its
+findings are below and in `LEVERS.md` / `docs/`, and they are the durable part.
+
+| what survives | why |
 |---|---|
-| Cloth error functional `J` (mock) | done, 21 tests |
-| **Garment functional `J` (real LeHome metric)** | done, 16 tests |
-| Damped impedance controller | done, 20 tests |
-| Lyapunov descent reward | done, 22 tests |
-| Vision + attention policy | done, 21 tests |
-| Damped PPO + runner | done, 21 tests |
-| Task env + mock backend | done, 24 tests |
-| Isaac/LeHome backend adapter | done, **closed-loop verified 8/8 to 0.0000 m** |
-| Run contracts + watchdogs | done, 25 tests |
-| BC pipeline (preprocess/dataset/train) | done, **two runs completed — both failed, see below** |
-| Parallel envs (`num_envs > 1`) | works at N=4; **not training-ready** (static scene is global, envs are not physically equivalent) |
-| Damped-RL finetuning entrypoint | written, not yet run |
+| `math/garment_functional.py` — the objective `J` | zero set is LeHome's own `success_checker_garment_fold`, verified over 300 configs. Scores any policy, however produced. |
+| `tasks/isaac_garment_backend.py` | live garment env, needed to evaluate a policy in sim |
+| `tasks/isaac_app.py` | guarded Isaac launcher — Kit ignores SIGTERM and orphans at 300% CPU otherwise |
+| `README.md`, `LEVERS.md`, `docs/` | the measurements |
 
-**198/198 tests pass.** Isaac Sim launches headless on aarch64, the real garment
-env builds and steps, `J` computes on real particle data, and **replayed
-demonstrations reach `J = 0`** (see below).
+**Why the custom stack was retired.** Two structural limits, both measured:
 
-**Behaviour cloning has now been run and evaluated closed-loop. It does not
-work**, and the reason is a property of the demonstrations rather than of the
-loss — see [Why behaviour cloning fails here](#why-behaviour-cloning-fails-here).
-Do not read the mechanisms below as achieving their goals; several are measured
-to be insufficient, and the measurements are recorded alongside them.
+* **Vision.** A 0.63M conv encoder trained from scratch on 83k frames of one
+  scene never learned to read cloth. Its apparent `R² 0.87` for predicting `J`
+  was reading the *clock*: a phase-only predictor that sees no image scored
+  0.810 on the same target, and within-band `R²` was negative — classification,
+  not regression. Confirmed behaviourally: under randomised texture and lighting
+  the policy's closed-loop `J` moved 0.009, against frozen's own 0.086 noise.
+* **RL budget.** 8.7 policy steps/s at `num_envs=1`, with a measured ceiling of
+  ~18 steps/s because cloth simulation is serial across environments. Manipulation
+  policies of this kind train on 1e7–1e9 steps. Two to three orders short, and
+  no amount of tuning closes that.
+
+Three behaviour-cloning designs and two RL runs all failed, and none of them
+beat a frozen arm in closed loop. The one thing that reaches `J = 0` is
+replaying a demonstration at its recorded pose.
 
 ## Reachability: the real task is solvable here
 

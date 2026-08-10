@@ -1,18 +1,7 @@
-"""Task, reward, backend, and registration."""
-from .backend import LeHomeBackend, MockClothCfg, MockFoldGarmentBackend
-from .cfg import TASK_NAME, build_lehome_real_damped_cfg, make_env, register_task
-from .lehome_fold_garment_real_damped_task import LeHomeFoldGarmentRealDampedEnv
-from .rewards import LyapunovDescentReward, LyapunovRewardCfg
+"""Isaac/LeHome environment access, retained for evaluating policies in sim.
 
-__all__ = [
-    "LeHomeBackend",
-    "MockClothCfg",
-    "MockFoldGarmentBackend",
-    "LeHomeFoldGarmentRealDampedEnv",
-    "LyapunovDescentReward",
-    "LyapunovRewardCfg",
-    "TASK_NAME",
-    "build_lehome_real_damped_cfg",
-    "make_env",
-    "register_task",
-]
+The custom training stack (mock backend, reward shaping, task env, parallel
+envs) was retired when the project moved to finetuning a pretrained VLA. What
+remains is what a policy still needs to be *scored*: a live LeHome garment
+environment and a guarded Isaac launcher.
+"""
