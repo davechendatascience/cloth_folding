@@ -47,6 +47,11 @@ p.add_argument("--ablate", action="store_true",
                     "If commanding the arm does not improve prediction, there is no "
                     "dp/du to invert and model-based control is impossible -- the "
                     "cloth would be predictable but not controllable.")
+p.add_argument("--kernel_scale", type=float, default=5.0,
+               help="contact-kernel length scale in cm. Was a guess; --sweep_kernel fits it.")
+p.add_argument("--kernel_shape", default="rational",
+               choices=["rational", "exp", "gauss"],
+               help="rational 1/(1+(d/L)^2) | exp exp(-d/L) | gauss exp(-(d/L)^2)")
 p.add_argument("--seed", type=int, default=0)
 args = p.parse_args()
 
@@ -106,7 +111,13 @@ for e in eps:
         # Contact kernel: a gripper moves nearby cloth and not distant cloth.
         # Handing the model prox * dee is handing it the contact model, rather
         # than asking it to rediscover an inverse-distance law from data.
-        prox = 1.0 / (1.0 + (dist / 5.0) ** 2)        # 5 cm length scale
+        L = args.kernel_scale
+        if args.kernel_shape == "rational":
+            prox = 1.0 / (1.0 + (dist / L) ** 2)
+        elif args.kernel_shape == "exp":
+            prox = np.exp(-dist / L)
+        else:
+            prox = np.exp(-((dist / L) ** 2))
         contact_act = (prox[..., None] * dee[:, :, None, :])   # (T, 2, n_cp, 3)
         blocks.update({
             "ee": E_[:-h].reshape(n, -1),
