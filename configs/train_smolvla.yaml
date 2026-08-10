@@ -1,0 +1,63 @@
+# LeHome's official configs/train_smolvla.yaml, with three deviations.
+#
+# Run from the lehome-challenge checkout (dataset.root is relative, as theirs is):
+#   cd ~/Documents/GitHub/lehome-challenge
+#   .venv/bin/lerobot-train --config_path=../cloth_folding/configs/train_smolvla.yaml
+#
+# Deviations from the official file, all deliberate:
+#
+#  1. `pretrained_path: lerobot/smolvla_base`  -- NOT in the official config, and
+#     without it this trains from scratch. SmolVLAConfig defaults
+#     `load_vlm_weights: False`, and lerobot itself logs "Training SmolVLA from
+#     scratch using PEFT. This is unlikely to yield good results." Loading the
+#     base checkpoint flips it to True. Any published baseline number is
+#     finetuning this checkpoint, so matching it is required for comparability.
+#  2. `video_backend: pyav` -- the official default is torchcodec, which is not
+#     installed in the Isaac venv (and installing it risks isaacsim_core's exact
+#     torch==2.7.0 pin). pyav 15.1.0 is already present. This changes decode
+#     speed, not decoded content.
+#  3. `save_freq` 5000 -> 2500 and `log_freq` 1000 -> 250. Observation cadence
+#     only; neither touches the optimisation.
+#
+# Everything else -- batch_size 32, steps 30000, the explicit input/output
+# feature declarations, MEAN_STD normalisation -- is theirs, unchanged.
+
+dataset:
+  repo_id: lehome/dataset_challenge_merged
+  root: Datasets/example/top_long_merged
+  revision: main
+  video_backend: pyav
+
+policy:
+  type: smolvla
+  pretrained_path: lerobot/smolvla_base
+  device: cuda
+  push_to_hub: false
+
+  input_features:
+    observation.state:
+      type: STATE
+      shape: [12]
+    observation.images.top_rgb:
+      type: VISUAL
+      shape: [3, 480, 640]
+    observation.images.left_rgb:
+      type: VISUAL
+      shape: [3, 480, 640]
+    observation.images.right_rgb:
+      type: VISUAL
+      shape: [3, 480, 640]
+
+  output_features:
+    action:
+      type: ACTION
+      shape: [12]
+
+output_dir: /home/edge-host/Documents/GitHub/cloth_folding/runs/smolvla_top_long
+batch_size: 32
+steps: 30000
+save_freq: 2500
+log_freq: 250
+
+wandb:
+  enable: false

@@ -405,3 +405,29 @@ post = Unnormalizer, Device
 Cameras return `(1, 480, 640, 3)` **uint8**, so scaling is now keyed on dtype
 rather than on `x.max() > 1.5` — a genuinely dark frame has `max < 1.5` as a
 uint8 too, and the heuristic skipped the division for exactly those frames.
+
+### The official LeHome eval: two more defects, and the protocol
+
+`scripts/run_lehome_eval.sh` + `scripts/lehome_eval.py` run LeHome's own
+`scripts.eval`, which reports `env._get_success()` — the metric comparable to
+published baselines. Their `main()` is called unmodified; only process start-up
+is patched. Two blockers, both aarch64-specific and neither documented:
+
+| defect | why it happens |
+|---|---|
+| `python -m scripts.eval` cannot start | `scripts/eval.py` forces the multiprocessing start method to `spawn` *before* importing `isaaclab.app`. `isaacsim.__init__.bootstrap_kernel()` calls `aarch_preload_checking()`, which starts a `Process` **at import time**. Under `spawn` the child unpickles a target living in `isaacsim`, re-imports it, and spawns again — unbounded recursion, so the first import already dies. x86_64 never sees this: the ARM check returns immediately there. |
+| `module 'warp.types' has no attribute 'array'` | IsaacLab's `setup.py` requires **`warp-lang` unpinned**, so pip installed 1.16.0, which shadows the `omni.warp.core-1.8.2` Isaac ships. 1.16.0 has neither `warp.types.array` nor `warp.context`. No 1.8.2 exists on PyPI for aarch64; **1.8.1** has both and works. |
+
+The fix for the first is to suppress the forced `spawn` and stay on `fork`.
+Pre-importing `isaacsim` under `fork` also clears the recursion but loads Kit
+before AppLauncher configures the environment, and every extension then fails
+with `module 'warp' has no attribute 'context'` — a *different* symptom with the
+same root cause, which is what made this confusing to bisect.
+
+**The protocol** (defaults from `setup_eval_parser`): `seed 42`,
+`use_random_seed False` (deterministic), `max_steps 600`, `step_hz 120`, and
+`num_episodes` is **per garment** across **12 garments** — so `--num_episodes 2`
+is 24 episodes and takes ~45 min alongside a training job. Garment placement is
+randomised by `env.reset()` + `stabilize_garment_after_reset`, *not* taken from
+demo poses; that is correct for measuring a policy, unlike demo replay, where
+per-episode pose is mandatory.
