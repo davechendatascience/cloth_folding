@@ -332,3 +332,38 @@ problem at its root (62% compute / 0% memory bandwidth = not enough parallel
 work), and it is simultaneously the thing that makes on-policy RL feasible:
 1.4 policy steps/s × 64 envs changes an 83-day budget into something closer to
 a day.
+
+---
+
+## π₀ finetuning: precision × gradient checkpointing on GB10
+
+Measured 2026-08-10, `lerobot-train --policy.type=pi0`, batch 4, 3 cameras at
+480×640, on the merged Top-Long dataset. GB10 has **unified memory** — there is
+no separate VRAM, so the model, the dataloader and the OS compete for one
+121 GB pool and `nvidia-smi` reports memory as N/A. Headroom is a stability
+requirement, not a nicety: the box was already 8 GB into swap at the start.
+
+| config | used | free | s/step | loss@50 | loss@250 | 30k steps |
+|---|---|---|---|---|---|---|
+| fp32, no checkpointing | 92 GB | **1 GB** | 3.71 | 0.561 | 0.324 | 32 h |
+| fp32 + checkpointing | 83 GB | **6 GB** | **5.19** | 0.561 | — | **43 h** |
+| **bf16 + checkpointing** | **51 GB** | **38 GB** | **2.58** | 0.611 | 0.490 | **21.5 h** |
+
+Three things worth keeping:
+
+- **Gradient checkpointing barely helps fp32 here** (92 → 83 GB) and costs 40%
+  throughput. I predicted ~60 GB free on the assumption that activations were
+  ~36 GB of the fp32 footprint; they are ~9 GB. The footprint is dominated by
+  weights + gradients + Adam moments (3.5 B params × 16 B ≈ 56 GB in fp32),
+  which checkpointing does not touch.
+- **Precision, not checkpointing, drives the loss gap.** fp32+ckpt reproduced
+  fp32's loss exactly (0.561 at step 50), isolating the variable. bf16 converges
+  ~50% slower *per step* at step 250.
+- **bf16 still wins per wall-clock hour** — ~1400 steps/h vs ~690 — so it does
+  2× the optimisation in the same time, and it is the only configuration with
+  enough headroom to leave running unattended for a day.
+
+Untested middle ground: `--policy.dtype=float32 --policy.use_amp=true`, i.e.
+fp32 master weights with bf16 compute. That should recover fp32's convergence at
+bf16's speed, but it keeps the fp32 optimiser state, so expect the ~83 GB
+footprint and only ~6 GB free.
