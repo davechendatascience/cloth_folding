@@ -7,3 +7,5 @@ __pycache__/
 runs/
 logs/
 outputs/
+data/perception_v1/
+data/*/images.u8
