@@ -67,15 +67,27 @@ simulation_app = launcher.app
 EXIT = 0
 try:
     import torch  # noqa: E402
+    from lerobot.policies.factory import make_pre_post_processors  # noqa: E402
     from lerobot.policies.pi0.modeling_pi0 import PI0Policy  # noqa: E402
     from lehome.real_damped_project.tasks.isaac_garment_backend import (  # noqa: E402
         IsaacGarmentCfg, IsaacGarmentBackend,
     )
 
     policy = PI0Policy.from_pretrained(args.ckpt).to(args.policy_device).eval()
+
+    # The processor pipeline is NOT optional and skipping it fails silently.
+    # `preprocessor` tokenises the language string (pi0 reads
+    # `observation.language.tokens`, not `task`), adds the batch dimension and
+    # normalises; `postprocessor` UN-normalises the action. Feeding
+    # `select_action` a raw observation raises KeyError, but dropping the
+    # postprocessor does not raise -- it just commands normalised joint targets,
+    # which would produce a plausible-looking J that means nothing.
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy.config, pretrained_path=args.ckpt)
     print(f"[pi0] loaded {args.ckpt}", flush=True)
     print(f"[pi0] n_action_steps={policy.config.n_action_steps} "
           f"chunk={policy.config.chunk_size}", flush=True)
+    print(f"[pi0] pre={[type(s).__name__ for s in preprocessor.steps]}", flush=True)
 
     # ORIGINAL under-damped joints: the plant the demonstrations were recorded
     # on, and the one pi0 was finetuned against. Our critical damping is a
@@ -103,7 +115,7 @@ try:
             ("right_rgb", "right_camera"))
 
     def observation():
-        """Build pi0's expected batch from the live simulator.
+        """Build the raw observation the preprocessor expects.
 
         Reads the cameras at their NATIVE 480x640 rather than through
         `backend.render_cameras()`, which downsamples to an 84x84 square for the
@@ -113,19 +125,24 @@ try:
 
         Keys must match the dataset feature names the policy was finetuned on,
         for the same reason.
+
+        Everything here is UNBATCHED and `task` is a bare string, because
+        `AddBatchDimensionProcessorStep` in the pipeline adds the batch axis
+        itself; pre-batching yields (1, 1, ...) and mis-shaped attention.
         """
-        batch = {
-            "observation.state": backend.get_proprioception()
-                                 .to(args.policy_device).reshape(1, -1).float(),
-            "task": [args.task],
+        obs = {
+            "observation.state": backend.get_proprioception().reshape(-1).float(),
+            "task": args.task,
         }
         for name, attr in CAMS:
-            rgb = getattr(backend.env, attr).data.output["rgb"]      # (1, H, W, 3) uint8
-            x = rgb.permute(0, 3, 1, 2).float()
-            if x.max() > 1.5:
-                x = x / 255.0
-            batch[f"observation.images.{name}"] = x.to(args.policy_device)
-        return batch
+            rgb = getattr(backend.env, attr).data.output["rgb"]   # (1, H, W, 3) uint8
+            x = rgb[0].permute(2, 0, 1)                           # (3, H, W)
+            # Scale by dtype, not by `x.max() > 1.5`: a genuinely dark frame has
+            # max < 1.5 as a uint8 too, and that heuristic would silently skip
+            # the division for exactly those frames.
+            x = x.float() / 255.0 if x.dtype == torch.uint8 else x.float()
+            obs[f"observation.images.{name}"] = x
+        return obs
 
     @torch.no_grad()
     def rollout(mode: str, ep: int):
@@ -140,7 +157,9 @@ try:
         q0 = backend.get_proprioception().clone()
         for t in range(args.steps):
             if mode == "pi0":
-                act = policy.select_action(observation()).reshape(-1).to(backend.device)
+                act = postprocessor(
+                    policy.select_action(preprocessor(observation()))
+                ).reshape(-1).to(backend.device)
             elif mode == "frozen":
                 act = q0.clone().reshape(-1)
             else:

@@ -367,3 +367,41 @@ Untested middle ground: `--policy.dtype=float32 --policy.use_amp=true`, i.e.
 fp32 master weights with bf16 compute. That should recover fp32's convergence at
 bf16's speed, but it keeps the fp32 optimiser state, so expect the ~83 GB
 footprint and only ~6 GB free.
+
+### Running the π₀ eval: the environment is the hard part
+
+`scripts/run_eval_pi0.sh` exists because the evaluation needs π₀ **and** Isaac
+Lab in one interpreter, and no venv had both. Five separate blockers, all found
+by preflight rather than at the first checkpoint:
+
+| blocker | symptom | fix |
+|---|---|---|
+| project venv has no `isaaclab` | `ModuleNotFoundError` | run in `lehome-challenge/.venv`, which has both |
+| torchvision 0.24.0 vs torch 2.7.0 | `operator torchvision::nms does not exist` | `torchvision==0.22.0+cu128`, `--no-deps` |
+| stock transformers 4.57.6 | lerobot raises *"An incorrect transformer version is used"* | the `fix/lerobot_openpi` fork (4.53.3) + `tokenizers<0.22`, both `--no-deps` |
+| `LD_PRELOAD` path form | Isaac refuses to boot | it matches the literal `/lib/aarch64-linux-gnu/libgomp.so.1`, **not** the `/usr/lib/...` symlink to the same file |
+| CWD | `FileNotFoundError: Garment directory not found` after ~60 s of start-up | LeHome resolves garment USDs relative to CWD; run from the `lehome-challenge` checkout |
+
+All installs used `--no-deps` deliberately: `isaacsim_core` pins `torch==2.7.0`
+exactly, so any resolver allowed to touch torch silently destroys the Isaac
+install. Reverting is symmetrical (`torchvision==0.24.0`, `transformers==4.57.6`).
+
+**Two bugs in the eval script itself, both silent.** π₀ in lerobot 0.4.3 is
+driven through a processor pipeline, not called directly:
+
+```
+pre  = RenameObservations, AddBatchDimension, Pi0NewLine, Tokenizer, Device, Normalizer
+post = Unnormalizer, Device
+```
+
+- The script passed `task` as a raw string; π₀ reads
+  `observation.language.tokens`. That one at least raises `KeyError`.
+- It skipped the **postprocessor**, which un-normalises the action. That does
+  *not* raise — it would have commanded normalised joint targets and returned a
+  perfectly plausible J that meant nothing.
+- It also pre-batched the observation, which `AddBatchDimensionProcessorStep`
+  would have turned into `(1, 1, ...)`.
+
+Cameras return `(1, 480, 640, 3)` **uint8**, so scaling is now keyed on dtype
+rather than on `x.max() > 1.5` — a genuinely dark frame has `max < 1.5` as a
+uint8 too, and the heuristic skipped the division for exactly those frames.
