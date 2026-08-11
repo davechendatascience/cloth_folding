@@ -74,6 +74,25 @@ class _BlankPolicy(_AblatedLeRobotPolicy):
     MODE = "blank"
 
 
+class _NoopPolicy(LeRobotPolicy):
+    """Hold the current joint configuration: the do-nothing control.
+
+    Without this, a graded J means nothing. Cloth dropped on a table settles on
+    its own, and an arm thrashing near it will move check-points around, so
+    "J fell from 7.4 to 4.9" is only evidence of manipulation if doing nothing
+    scores worse. This is the official-harness equivalent of the frozen-arm
+    baseline (J = 7.118) measured on the old custom harness -- that number came
+    from a different protocol and different garments, so it cannot be reused
+    here directly.
+
+    Commanding the current state as the position target is exactly "stay put",
+    since the action space is 12 joint position targets.
+    """
+
+    def select_action(self, observation):
+        return np.asarray(observation["observation.state"], dtype=np.float32).reshape(-1)
+
+
 def install() -> str | None:
     """Swap the registered `lerobot` policy for an ablated one, if requested.
 
@@ -82,10 +101,12 @@ def install() -> str | None:
     mode = os.environ.get("LEHOME_ABLATE", "").strip().lower()
     if not mode:
         return None
-    if mode not in ("frozen", "blank"):
-        raise SystemExit(f"LEHOME_ABLATE must be 'frozen' or 'blank', got {mode!r}")
+    if mode not in ("frozen", "blank", "noop"):
+        raise SystemExit(
+            f"LEHOME_ABLATE must be 'frozen', 'blank' or 'noop', got {mode!r}")
 
-    cls = _BlankPolicy if mode == "blank" else _AblatedLeRobotPolicy
+    cls = {"blank": _BlankPolicy, "noop": _NoopPolicy}.get(
+        mode, _AblatedLeRobotPolicy)
     # register_policy() refuses to overwrite, so replace the entry directly.
     PolicyRegistry._registry["lerobot"] = cls
     print(f"[ablate_vision] ACTIVE mode={mode} -- 'lerobot' now {cls.__name__}. "

@@ -59,4 +59,14 @@ if __name__ == "__main__":
 
     ablate_vision.install()
 
+    # Optional check-point position logging, controlled by LEHOME_LOG_CP.
+    import log_checkpoints
+
+    log_checkpoints.install()
+
+    # Optional joint state/action logging, controlled by LEHOME_LOG_ACT.
+    import log_actions
+
+    log_actions.install()
+
     main()
