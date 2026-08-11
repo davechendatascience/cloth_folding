@@ -91,4 +91,9 @@ if __name__ == "__main__":
 
     remote_ws_policy.install()
 
+    # Optional recorded-action playback, controlled by LEHOME_REPLAY_EPISODE.
+    import replay_policy
+
+    replay_policy.install()
+
     main()

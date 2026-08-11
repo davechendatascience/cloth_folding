@@ -330,3 +330,45 @@ detection regression: J 7.15 -> **min 0.118** -> final 0.15, with 48 steps below
 the threshold and still fails on physics variance alone. The ~27% replay rate is
 not sloppiness in the demonstrations -- the task is marginal at these thresholds,
 and any success rate measured here carries that noise floor underneath it.
+
+---
+
+## ROOT CAUSE (2026-08-11): our cameras do not render the garment's motion
+
+Drove the eval with **recorded demonstration actions** (`scripts/replay_policy.py`)
+so the rollout follows episode 0 exactly, and captured the observation video.
+Same actions, same garment, same start pose as the recording — therefore any
+difference is purely rendering.
+
+| | pixels ever changing >25 | drift f0 -> end |
+|---|---|---|
+| **demo recording** | **53.85%** | 11.83 |
+| our render, `rendering_mode=performance` | 6.51% | 3.13 |
+| our render, `rendering_mode=quality` (their default) | 0.35% | 6.05 |
+
+The recording shows over half the frame changing as the garment folds. Ours shows
+6.5%, or 0.35% under the shipped default. Frame-to-frame the sim video is noise
+around a nearly fixed scene: `|f_k - f_0|` reaches 3.15 by frame 28 and stays
+flat for all 315 frames while consecutive frames differ by 2.63.
+
+Meanwhile the physics is fine — that same trajectory reaches J = 0.118.
+
+**So the simulation advances and the cameras do not follow it.** This is the
+single defect underneath everything:
+
+* image-conditioned policies are shown a near-static scene and cannot act
+* demo replay succeeds because it is open-loop and never reads an image
+* our SmolVLA and the 74.5% challenge winner fail identically, on our eval chain
+  and on the winner's own
+
+`performance` mode is ~19x better than `quality` here (6.51% vs 0.35%) and was a
+real improvement, but it is an order of magnitude short of the 53.85% the
+recording shows. Likely the same GB10/sm_121 RTX problem that prevents
+`rtx/nrd/PackForNRD.cs.hlsl` from compiling.
+
+**Next:** find why camera output lags the physics. Candidates, cheapest first —
+`sim.render_interval` vs `decimation` binding (a known trap in this repo: setting
+`decimation` does not update `render_interval`, which is bound at class definition
+time); whether `env.step()` actually triggers a camera update on this build; and
+whether `use_fabric=False` in `SimulationCfg` starves the render of updated
+transforms. Until this is closed, no closed-loop number here is meaningful.
