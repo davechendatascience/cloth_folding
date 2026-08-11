@@ -106,4 +106,9 @@ if __name__ == "__main__":
 
     shift_top_camera.install()
 
+    # Optional gripper-reach probe, controlled by LEHOME_PROBE_REACH.
+    import probe_gripper_reach
+
+    probe_gripper_reach.install()
+
     main()

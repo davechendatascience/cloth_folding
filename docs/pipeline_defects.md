@@ -483,3 +483,46 @@ Physics, not graphics: why does replaying the exact recorded joint trajectory
 not reproduce the recorded fold? Note the task tolerates 7.2-9.9 cm on
 check-point distances, so this is not a precision problem -- the cloth is barely
 being displaced at all.
+
+---
+
+## The right gripper never reaches the cloth (2026-08-11)
+
+`scripts/probe_gripper_reach.py` (`LEHOME_PROBE_REACH=1`) logs, every step, the
+distance from each gripper body to the **nearest of the 14,544 cloth particles**
+(not just the six check-points -- a hand can be on the fabric while far from
+every check-point). Replayed recorded episode-0 actions, 965 ticks:
+
+```
+                 min     p05   median   <=0.09m (contact)   <=0.12m
+left  gripper   0.065   0.068   0.110      156/965            570
+right gripper   0.101   0.103   0.146        0/965            144
+
+both within 0.12 m simultaneously:  141/965
+```
+
+The gripper *body* origin sits ~9 cm from the contact point (calibrated over
+4,926 demo frames where cloth tracked a gripper). So the left hand genuinely
+lands on the fabric for 156 steps; **the right never does -- 0 of 965, never
+closer than 0.101 m**, ~1 cm short at its best moment and ~5.6 cm short
+typically.
+
+A bimanual fold with one hand always off the cloth cannot work: the shirt gets
+tugged rather than folded, which is exactly the measured footprint behaviour
+(flat at 17.2% while the recording drops to 6.3%).
+
+**This is on replayed recorded actions**, so the joint trajectory is correct by
+construction. The joint values that put the right gripper on the fabric during
+recording do not put it there here -- a kinematic discrepancy (right arm base
+placement, or a URDF/link offset), not policy or perception.
+
+Consistent with this repo's earlier findings: a systematic ~9 cm
+gripper-body-to-contact offset, and DLS IK saturating at a 56.7 cm floor.
+
+**Methodology note.** The first version sampled every 30th tick (33 samples) and
+gave left-min 0.070 / right-min 0.100. Full resolution gives 0.065 / 0.101 --
+close here, but a sampled minimum is not a minimum, and today has produced five
+separate wrong conclusions from under-validated metrics. Log every step.
+
+**Still unexplained:** why the 74.5% challenge winner also no-ops here. A
+visually closed-loop policy should compensate for a hand that is short.
