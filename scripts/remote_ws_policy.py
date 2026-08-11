@@ -70,19 +70,38 @@ class RemoteWSPolicy(BasePolicy):
     def reset(self):
         self._queue: list[np.ndarray] = []
         self._initial = None
+        self._gt = None          # latched garment_type_pred, per their eval_worker
         self._session = f"s{np.random.randint(1 << 30)}"
+
+    def _encode(self, observation, garment_type_id):
+        req: Dict[str, Any] = {"type": "infer_chunk", "session_id": self._session}
+        if garment_type_id is not None:
+            req["garment_type_id"] = int(garment_type_id)
+        for k, v in observation.items():
+            if not k.startswith("observation."):
+                continue
+            a = np.asarray(v)
+            if "images" in k:
+                req[k] = _enc(a[..., :3])
+            elif k == "observation.state":
+                req[k] = _enc(a.astype(np.float32).reshape(-1))
+        return req
 
     def select_action(self, observation: Dict[str, np.ndarray]) -> np.ndarray:
         if not self._queue:
-            req: Dict[str, Any] = {"type": "infer_chunk", "session_id": self._session}
-            for k, v in observation.items():
-                if not k.startswith("observation."):
-                    continue
-                a = np.asarray(v)
-                if "images" in k:
-                    req[k] = _enc(a[..., :3])
-                elif k == "observation.state":
-                    req[k] = _enc(a.astype(np.float32).reshape(-1))
+            # Garment-type warmup, mirroring their eval_worker: one throwaway
+            # call with id 0 whose ONLY useful output is garment_type_pred. The
+            # policy carries garment-type input tokens, so without this it runs
+            # unconditioned -- folding without being told what it is folding.
+            # Actions, values and inpainting from this call are discarded.
+            if self._gt is None:
+                self.ws.send(json.dumps(self._encode(observation, 0)))
+                warm = json.loads(self.ws.recv())
+                gt = warm.get("garment_type_pred")
+                self._gt = int(gt) if gt is not None else 0
+                print(f"[remote_ws] garment_type warmup -> {self._gt}", flush=True)
+
+            req = self._encode(observation, self._gt)
             req["initial_actions"] = (self._initial.tolist()
                                       if self._initial is not None else None)
             self.ws.send(json.dumps(req))
@@ -90,6 +109,9 @@ class RemoteWSPolicy(BasePolicy):
             chunk = np.asarray(resp["actions"], dtype=np.float32)
             nxt = resp.get("next_initial_actions")
             self._initial = np.asarray(nxt, dtype=np.float32) if nxt is not None else None
+            gt = resp.get("garment_type_pred")
+            if gt is not None:
+                self._gt = int(gt)
             self._queue = list(chunk[: self.execute_n])
         return np.asarray(self._queue.pop(0), dtype=np.float32).reshape(-1)
 

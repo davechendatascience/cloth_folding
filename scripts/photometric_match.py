@@ -68,9 +68,19 @@ def _match(img: np.ndarray, key: str) -> np.ndarray:
     tm, ts = np.asarray(stats[0], np.float32), np.asarray(stats[1], np.float32)
 
     if x.ndim == 3 and x.shape[-1] == 3:
-        m = x.mean(axis=(0, 1))
-        s = x.std(axis=(0, 1)) + 1e-6
-        x = (x - m) / s * ts + tm
+        # Match LUMINANCE only, applying one affine to all three channels, so
+        # chroma ratios survive. Per-channel matching (the previous version)
+        # corrects brightness but rewrites hue: it drove bluish-pixel fraction
+        # 41.3% -> 11.0% and rendered the denim garment violet. A policy
+        # conditioned on colour is then looking at the wrong object.
+        lum = x @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+        tl = float(np.dot(np.asarray(stats[0], np.float32),
+                          [0.2126, 0.7152, 0.0722]))
+        tsl = float(np.dot(np.asarray(stats[1], np.float32),
+                           [0.2126, 0.7152, 0.0722]))
+        gain = tsl / (lum.std() + 1e-6)
+        bias = tl - gain * lum.mean()
+        x = x * gain + bias
     else:  # unexpected layout -- fall back to a scalar match, never crash an eval
         x = (x - x.mean()) / (x.std() + 1e-6) * float(ts.mean()) + float(tm.mean())
 

@@ -526,3 +526,45 @@ separate wrong conclusions from under-validated metrics. Log every step.
 
 **Still unexplained:** why the 74.5% challenge winner also no-ops here. A
 visually closed-loop policy should compensate for a hand that is short.
+
+---
+
+## Interventions tried against both policies (2026-08-11)
+
+Post-settling check-point displacement, cm. **Baseline must exclude the reset
+drop**: the garment falls z=0.73 -> 0.53, which shows up as 18-29 cm of
+"displacement" identical in every run. Measuring from frame 0 produced a
+spurious "the camera fix revived the policy" result that had to be retracted --
+two different policies gave byte-identical numbers, which is the tell.
+
+| run | p0 | p1 | p2 | p3 | p4 | p5 |
+|---|---|---|---|---|---|---|
+| **replay of recorded actions** | 1.1 | 0.6 | 0.7 | 0.2 | **29.8** | **26.6** |
+| winner pi0.5, camera fix + per-channel photometry | 0.6 | 0.6 | 0.5 | 6.3 | 1.1 | 0.5 |
+| winner pi0.5, + garment_type conditioning | 0.6 | 0.6 | 0.4 | 4.8 | 1.3 | 0.4 |
+| winner pi0.5, + hue-preserving photometry | 0.6 | 0.6 | 0.4 | 1.1 | 1.2 | 0.4 |
+| our SmolVLA, camera fix + photometry | 0.7 | 0.5 | 0.5 | 0.3 | 1.1 | 0.4 |
+
+**Nothing revives either policy.** Only replayed recorded actions move the cloth.
+
+Fixes applied along the way, all real but none sufficient:
+
+* **camera 0.27 m too close** -- garment rendered at 37.1% of frame vs the
+  recording's 20.5%, clipped at the edges. `scripts/shift_top_camera.py`.
+* **photometric match rewrote hue** -- per-channel mean/std matching drove
+  bluish-pixel fraction 41.3% -> 11.0% and rendered denim violet. Now matches
+  luminance only, applying one affine across channels (14.8% -> 15.7% preserved).
+* **garment-type conditioning was missing** -- their `eval_worker` does a warmup
+  call with `garment_type_id=0`, latches `garment_type_pred`, and sends it on
+  every later request. Their model carries garment-type input tokens. Added to
+  `scripts/remote_ws_policy.py`; warmup returns 0 and it changes nothing.
+
+**The one measurement that has never moved:** the right gripper never reaches the
+cloth -- 0/965 steps within contact range, floor 0.101 m, identical with and
+without the camera shift (as it must be: a camera cannot change physics).
+
+**Where this points.** Recorded actions work; trained policies do not. The
+winner trained by RL+DAgger *inside* the simulator and never depended on the
+recorded trajectories mapping into it. If those trajectories place the right
+gripper ~1 cm short here, behaviour cloning inherits that exactly -- and a
+policy that never gets feedback from the cloth has nothing to close the loop on.
