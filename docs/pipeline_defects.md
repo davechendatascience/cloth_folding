@@ -568,3 +568,83 @@ winner trained by RL+DAgger *inside* the simulator and never depended on the
 recorded trajectories mapping into it. If those trajectories place the right
 gripper ~1 cm short here, behaviour cloning inherits that exactly -- and a
 policy that never gets feedback from the cloth has nothing to close the loop on.
+
+---
+
+## CONCLUSION (2026-08-11): training is sound, the environment is not compatible
+
+### Offline imitation quality is comparable across all checkpoints
+
+Same 100 random dataset frames, same protocol, each checkpoint's own
+pre/post-processors (`scripts/offline_action_check.py` generalised):
+
+| checkpoint | type | MSE | vs persistence | mean abs err |
+|---|---|---|---|---|
+| ours, SmolVLA 15k from `smolvla_base` | smolvla | 0.00429 | 11.0x | 0.0381 rad |
+| `Papercold/lehome-smolvla-top-long` 30k, from scratch | smolvla | 0.00367 | 12.8x | 0.0365 rad |
+| `Papercold/lehome-act-top-long` 30k | act | 0.00937 | 5.0x | 0.0554 rad |
+| persistence baseline | | 0.04710 | 1.0x | |
+
+Ours is within 15% of a full-schedule third-party checkpoint at half the steps,
+and 2x better than the ACT one. **Nothing was wrong with our training.**
+
+### The environment is where it breaks
+
+Same policy, same robot state, only the images swapped:
+
+```
+dataset images -> action error 0.0264 rad
+our sim images -> action error 0.2438 rad      9.2x worse
+```
+
+The degradation is attributable to the image channel alone. Per joint it shows
+as a systematically less-extended arm (L_elbow 1.577 -> 0.763 against a truth of
+1.546), which is exactly the closed-loop behaviour measured: compressed action
+ranges, parked arms, grippers 10 cm off the cloth, no policy manipulating.
+
+### Why the images differ, as far as it was traced
+
+The camera is **rigidly attached to the robot base** at a fixed offset, so it
+cannot differ between setups -- and `scripts/probe_projection.py` confirms our
+render obeys its own configuration exactly (garment predicted to span 73.8% of
+frame width, measured 71.4%; robot bases project symmetric at equal depth).
+
+What differs is the **garment's settled configuration**:
+
+```
+              frame area   bbox        fill inside bbox
+DEMO ep0/1/2   20.5-24.5%  ~639x370      26-28%
+OUR SIM           37.1%     639x401       44.5%
+```
+
+Same bounding box, 1.65x the fill -- the recording shows a flat-laid shirt with
+sleeves spread and table visible through the gaps; ours settles more compactly.
+The garment is dropped from z=0.73 and settles under particle-cloth physics,
+which is exactly the kind of computation that varies with GPU, PhysX build and
+solver determinism.
+
+This also explains the ~27% replay success rate: the recorded actions were
+authored against *that* settled shape and only work when ours lands close enough.
+
+### Status
+
+* Reported to `lehome-official/lehome-challenge#69` (open issue, same symptom
+  reported independently on RTX 5090 -- also Blackwell -- with no reply since May).
+* Draft of that report kept at `docs/issue69_comment.md`.
+* Two upstream bugs found and documented: the `@step_interval(50)` success-checker
+  defect, and `/isaaclab/cameras_enabled` commented out in `tiled_camera.py` but
+  live in `camera.py`.
+* **Reusable asset:** the offline action check scores any checkpoint's imitation
+  quality in ~2 minutes with no simulator, against a persistence baseline. It is
+  the one metric in this whole investigation that never needed retracting.
+
+### Method note, for whoever picks this up
+
+Nearly every wrong turn here came from quoting a metric before validating it
+against a control. Six diagnoses were stated and retracted: renderer broken,
+robot not rendered, garment position not randomised, camera framing, compounding
+error, camera too close. What survived were measurements with a reference beside
+them -- replayed actions vs the recording, MESH vs VIEW, our config vs the
+winner's, dataset images vs sim images through the same policy. Threshold-based
+image metrics in particular produced four mutually contradictory scale estimates
+(1.8x, 1.59x, 0.75x, 0.55x) and should be treated as guilty until validated.

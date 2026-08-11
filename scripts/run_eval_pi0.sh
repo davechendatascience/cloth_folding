@@ -29,8 +29,16 @@ CKPT=$REPO/runs/$RUN/checkpoints/$STEP/pretrained_model
 
 [ -f "$CKPT/model.safetensors" ] || { echo "no checkpoint at $CKPT" >&2; exit 2; }
 
+# sklearn's bundled libgomp must be preloaded as well. transformers'
+# `generation/candidate_generator.py` hard-imports `sklearn.metrics.roc_curve`,
+# and by the time that dlopen happens the two libgomps above have consumed the
+# static TLS block, so it dies with "cannot allocate memory in static TLS
+# block". Preloading maps it at startup while TLS is still available. Globbed
+# because the hash in the filename changes with the scikit-learn version.
+SKGOMP=$(echo "$VENV"/lib/python3.11/site-packages/scikit_learn.libs/libgomp-*.so.1.0.0)
+
 cd "$CHAL"
-LD_PRELOAD="/lib/aarch64-linux-gnu/libgomp.so.1:$VENV/lib/python3.11/site-packages/torch/lib/libgomp.so.1" \
+LD_PRELOAD="/lib/aarch64-linux-gnu/libgomp.so.1:$VENV/lib/python3.11/site-packages/torch/lib/libgomp.so.1:$SKGOMP" \
 PYTHONPATH="$REPO/source" \
 OMNI_KIT_ACCEPT_EULA=YES PYTORCH_JIT=0 \
 exec "$VENV/bin/python" "$REPO/scripts/eval_pi0_in_sim.py" \
