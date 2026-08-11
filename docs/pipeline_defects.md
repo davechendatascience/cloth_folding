@@ -119,3 +119,42 @@ SmolVLA loads `smolvla_base` (450M total / 100M trainable, VLM frozen), loss
 falls 0.768 -> 0.042 over 14000 steps with grad norm decaying smoothly, and
 `data_s` ~0.01 confirms the input pipeline keeps up. The dataset itself is
 sound. The defect is confined to the evaluation render path.
+
+---
+
+## Fix log
+
+### #1 render mismatch — FIXED, and it did not help (2026-08-11)
+
+Two changes, both eval-side, neither requiring a retrain:
+
+* `--rendering_mode performance` — eliminates **all** 1,895
+  `PackForNRD.cs.hlsl` failures (`quality` 1895, `balanced` 185, `performance` 0)
+  and lifts mean pixel 105.6 -> 129.8.
+* `scripts/photometric_match.py` (`LEHOME_PHOTOMATCH=1`) — per-channel rescale of
+  each observation to the training statistics, measured over 40 dataset frames.
+  Lifts 129.8 -> 197.0 against the dataset's 208.6.
+
+Rejected along the way: raising the dome light 1200 -> 2400 moves the mean only
+129.8 -> 139.1 (the renderer tonemaps hard, so 2x light buys 7% of pixel value),
+and enabling `light_randomization` makes it *worse* — it samples `color`
+absolutely from [0.0, 0.2] against a 0.75 default, darkening more than the
+3500-5000 intensity brightens. That is a defect in their config.
+
+**Result on checkpoint 12500, one episode:**
+
+| | J start -> min -> final | max check-point displacement |
+|---|---|---|
+| no-op | 7.36 -> 7.36 -> 7.43 | — |
+| policy, broken render | 7.35 -> 7.33 -> 6.87 | 8.04 cm (single-vertex jump) |
+| policy, render fixed | 7.35 -> 7.33 -> 7.42 | 1.23 cm |
+
+With correct imagery the policy is **indistinguishable from doing nothing**. The
+render defect was real and is fixed; it was not the reason the policy fails.
+n=1, and run-to-run variance here is large, so this needs the full 12-garment
+protocol before it is more than indicative.
+
+**What this rules out:** train/eval appearance shift as the explanation.
+**What it does not rule out:** the policy simply has not learned the task at
+12500 steps (4.8 epochs), or `train_expert_only: True` leaving the frozen VLM
+features insufficient.

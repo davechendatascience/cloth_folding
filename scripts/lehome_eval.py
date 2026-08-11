@@ -69,4 +69,10 @@ if __name__ == "__main__":
 
     log_actions.install()
 
+    # Optional photometric matching, controlled by LEHOME_PHOTOMATCH. Installed
+    # last so it wraps whatever select_action the other shims left in place.
+    import photometric_match
+
+    photometric_match.install()
+
     main()
