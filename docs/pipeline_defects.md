@@ -434,3 +434,52 @@ ither). Each reversal came from a threshold-based image metric quoted before it
 was validated against a control. The measurements that held up were the ones
 with a reference beside them: replayed actions vs recording, MESH vs VIEW, our
 config vs the winner's.
+
+---
+
+## Two defects, separated (2026-08-11)
+
+`scripts/shift_top_camera.py` (`LEHOME_CAM_BACK=<m>`) moves the top camera back
+along its garment->camera axis, patched into
+`scripts.utils.common.stabilize_garment_after_reset` -- the first moment both the
+camera and a settled garment exist. Replayed recorded episode-0 actions with
++0.27 m (0.548 -> 0.818 m):
+
+### 1. Framing — FIXED
+
+```
+garment area in frame     before 37.1%  (clipped top and both sides)
+                          after  17.2%
+                          DEMO   20.5%   (20.5 / 20.5 / 24.5 over three episodes)
+```
+
+The camera was ~0.27 m too close. Slightly overshot: +0.19 m lands on 20.5%.
+
+### 2. Motion — NOT fixed
+
+```
+pixels ever changing >25
+  vs frame 0 (includes the one-off camera jump)   50.61%   <- artefact
+  vs frame 5 (post-shift only)                     2.23%   <- real
+  DEMO                                            53.85%
+```
+
+Garment area holds at 17.1-17.2% for all 315 steps. **Recorded actions still do
+not fold it.** Measuring against frame 0 would have reported a spurious 50.61%
+and looked like a fix -- the control was to re-baseline after the shift.
+
+### Unresolved tension
+
+The challenge winner used the **unmodified** camera config and scored 74.5%; its
+sim-round augmentation defaults are neutral. So either their training absorbed
+the same framing gap (they jitter camera position, rotation and focal length), or
+something in our setup differs from the standard configuration. Do not treat the
+0.27 m offset as "the fix" until that is explained -- it corrects a measured
+symptom, and the winner apparently did not need it.
+
+### Next
+
+Physics, not graphics: why does replaying the exact recorded joint trajectory
+not reproduce the recorded fold? Note the task tolerates 7.2-9.9 cm on
+check-point distances, so this is not a precision problem -- the cloth is barely
+being displaced at all.

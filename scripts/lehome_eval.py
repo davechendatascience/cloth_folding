@@ -101,4 +101,9 @@ if __name__ == "__main__":
 
     probe_cloth_sources.install()
 
+    # Optional top-camera distance shift, controlled by LEHOME_CAM_BACK.
+    import shift_top_camera
+
+    shift_top_camera.install()
+
     main()
