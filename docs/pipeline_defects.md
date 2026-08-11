@@ -372,3 +372,65 @@ recording shows. Likely the same GB10/sm_121 RTX problem that prevents
 time); whether `env.step()` actually triggers a camera update on this build; and
 whether `use_fabric=False` in `SimulationCfg` starves the render of updated
 transforms. Until this is closed, no closed-loop number here is meaningful.
+
+---
+
+## CORRECTION (2026-08-11): it is not the renderer, and not the camera
+
+Two measurements overturned the "render is broken" conclusion above. Both used
+`scripts/replay_policy.py` to drive the eval with **recorded episode-0 actions**,
+so the trajectory matches the recording exactly.
+
+### Camera geometry is correct (`scripts/probe_camera_geometry.py`)
+
+```
+camera world pos (-0.015, 0.190, 1.060)   garment centroid (-0.008, 0.056, 0.530)
+distance 0.547 m   HFOV 67.2 / VFOV 52.9  ->  visible extent 0.726 x 0.545 m
+garment 0.519 x 0.346 m  ->  predicted ~45% of frame area
+```
+
+### Garment extent over time, Otsu-segmented, robot masked out
+
+```
+step%  |  DEMO area    w    h  |   SIM area    w    h
+    0% |     20.5%   639  367  |     37.1%   639  401
+   36% |     15.3%   598  378  |     38.5%   639  401
+   72% |     11.3%   413  381  |     38.1%   639  401
+  100% |      6.3%   503  388  |     38.5%   639  401
+       |  swing 14.3 pp, 226px |  swing 1.6 pp, 0px
+```
+
+**The recorded garment folds** -- its footprint drops to a third. **Ours does not
+move at all.** And our 3D bbox barely moves either (y-extent 0.346 -> 0.294 m), so
+the image and the geometry agree: **the render is faithful to the physics.**
+
+### The camera is not the discrepancy either
+
+The winner's fork does not modify `garment_bi_cfg_v2.py` -- same camera config as
+ours -- and their sim-round augmentation defaults are neutral
+(`top_camera_pos_offset (0,0,0)`, `rot_offset (0,0,0)`, `focal_scale 1.0`). The
+large documented offsets (`[0, 0.25, 0.15]`, `-29 deg`) belong to
+`replay_real_in_sim.py`, which aligns the sim camera to their **real robot**.
+They scored 74.5% on our camera configuration.
+
+An apparent 1.9x area difference is explained by **fill density, not scale**:
+demo 20.5% within a 639x367 bbox (27% fill) vs ours 37.1% within 639x401 (44%
+fill). Same footprint, ours denser -- a bunched garment versus a flat-spread
+shirt whose thin sleeves let the table show through.
+
+### Where this leaves it
+
+Eliminated: renderer, `rendering_mode`, `use_fabric`, camera placement/FOV,
+garment scale, geometry writeback (`MESH == VIEW`), camera registration, policy,
+eval chain, action units, success predicate.
+
+Remaining: **the garment starts in a different configuration and recorded
+actions do not fold it here.** A physics / initial-state question. Consistent
+with the 27% replay rate, J stalling at 0.118, and a 74.5% policy no-opping --
+it acts on cloth that does not respond as its training data did.
+
+**Process note.** I reversed twice here (render broken -> camera too close -> ne
+ither). Each reversal came from a threshold-based image metric quoted before it
+was validated against a control. The measurements that held up were the ones
+with a reference beside them: replayed actions vs recording, MESH vs VIEW, our
+config vs the winner's.

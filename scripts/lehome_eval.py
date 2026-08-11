@@ -96,4 +96,9 @@ if __name__ == "__main__":
 
     replay_policy.install()
 
+    # Optional cloth-source divergence probe, controlled by LEHOME_PROBE_CLOTH.
+    import probe_cloth_sources
+
+    probe_cloth_sources.install()
+
     main()
