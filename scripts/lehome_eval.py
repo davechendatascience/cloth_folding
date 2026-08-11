@@ -75,4 +75,9 @@ if __name__ == "__main__":
 
     photometric_match.install()
 
+    # Optional open-loop horizon override, controlled by LEHOME_N_ACTION_STEPS.
+    import set_action_horizon
+
+    set_action_horizon.install()
+
     main()

@@ -158,3 +158,36 @@ protocol before it is more than indicative.
 **What it does not rule out:** the policy simply has not learned the task at
 12500 steps (4.8 epochs), or `train_expert_only: True` leaving the frozen VLM
 features insufficient.
+
+### #1 follow-ups: what the fixes ruled out (2026-08-11)
+
+Three experiments, each ruling out a hypothesis:
+
+| experiment | result | rules out |
+|---|---|---|
+| **demo replay** through this eval env | J 7.27 -> **0.00, Success** | environment, initial state, physics, success predicate, render fix |
+| **offline action check**, 120 demo frames | policy MSE 0.005083 vs persistence 0.044366 — **beats it 8.7x** | undertrained / model choice / data volume |
+| **`n_action_steps` 50 -> 10** (60 observations per episode, not 12) | J 7.35 -> 7.33, displacement <= 1.01 cm | open-loop horizon as the sole cause |
+
+So the environment works, the policy imitates well, and the two together do not.
+
+**Lead:** comparing the policy's joint distribution against demo episode 0, the
+**left arm never extends**:
+
+| joint | demo mean | demo range | policy mean | policy range | delta |
+|---|---|---|---|---|---|
+| L_lift | -0.627 | [-1.726, 1.264] | -1.420 | [-1.815, 0.201] | **-0.793** |
+| L_elbow | 0.598 | [-1.607, 1.547] | 1.380 | [-0.192, 1.630] | **+0.782** |
+| R_elbow | 0.684 | [-1.405, 1.559] | 0.579 | [-0.554, 1.584] | -0.105 |
+
+~45 degrees of offset on both left joints, in the directions that keep the arm
+folded, while the right arm tracks the demonstrations to ~0.1 rad. A bimanual
+fold with one arm parked cannot succeed, and replay -- which uses both -- does.
+
+Caveats: n=1 episode against n=1 demo episode, on a simulator with large
+run-to-run variance. Confirm across episodes before acting on it. Candidate
+causes to separate: a left/right observation or camera mismatch at eval, versus
+the policy genuinely having learned this asymmetry (checkable offline, by
+measuring per-joint error on left vs right across many demo frames -- the
+offline check already reports per-joint MSE and did **not** show the left arm
+as anomalous, which points at eval rather than training).
