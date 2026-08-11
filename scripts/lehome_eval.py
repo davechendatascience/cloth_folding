@@ -51,6 +51,11 @@ if __name__ == "__main__":
 
     from scripts.eval import main
 
+    # Repair LeHome's throttled success checker before anything imports it.
+    import fix_success_checker
+
+    fix_success_checker.install()
+
     # Optional vision ablation, controlled by LEHOME_ABLATE. Import order
     # matters: scripts.eval must be imported first so the stock policies are
     # registered, and install() then replaces the `lerobot` entry. With the

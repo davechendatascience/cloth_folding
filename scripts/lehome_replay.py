@@ -22,4 +22,10 @@ if __name__ == "__main__":
 
     from scripts.dataset_sim import main
 
+    import sys
+    sys.path.insert(0, "/home/edge-host/Documents/GitHub/cloth_folding/scripts")
+    import fix_success_checker
+
+    fix_success_checker.install()
+
     main()

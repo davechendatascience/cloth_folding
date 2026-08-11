@@ -288,3 +288,45 @@ or the reset not laying the garment flat.
 bluish-pixel fraction goes 41.3% raw -> 11.0% matched and the denim renders
 violet. Per-channel mean/std matching is the wrong transform; match luminance
 only, or fix the renderer instead.
+
+### #4 Success checker repaired (2026-08-11) — FIXED
+
+`scripts/fix_success_checker.py`, installed by both launchers before
+`lehome.tasks.bedroom` is imported (so the `from ... import` binding picks up the
+repaired reference).
+
+The upstream defect, in eight lines:
+
+```python
+def step_interval(interval=50):
+    def decorator(func):
+        call_count = 0                       # closure state, created ONCE
+        def wrapper(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count % interval == 0:
+                return func(*args, **kwargs) # a result dict
+            else:
+                return False                 # a bool
+```
+
+* returns a bare `False` where callers expect the dict — `_check_success` guards
+  with `isinstance(result, dict)`, so 49 of 50 calls silently read as "not
+  successful" rather than "not evaluated"
+* `call_count` never resets across episodes **or garment switches**, so which
+  step of an episode gets evaluated drifts arbitrarily through a run
+
+Repair unwraps the decorator and evaluates every call (`LEHOME_CHECK_INTERVAL`
+can re-throttle, but returns the cached last dict rather than `False`, with
+counter and cache reset per episode).
+
+**Verified** on a demo replay: **315 checks per episode, up from 13.**
+
+That run reported 0 successes, and it was a genuine near-miss rather than a
+detection regression: J 7.15 -> **min 0.118** -> final 0.15, with 48 steps below
+0.5. An earlier identical replay reached exactly 0.00 and succeeded.
+
+**This is worth carrying:** perfect action reproduction lands within ~1.2 cm of
+the threshold and still fails on physics variance alone. The ~27% replay rate is
+not sloppiness in the demonstrations -- the task is marginal at these thresholds,
+and any success rate measured here carries that noise floor underneath it.
