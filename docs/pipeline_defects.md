@@ -191,3 +191,49 @@ the policy genuinely having learned this asymmetry (checkable offline, by
 measuring per-joint error on left vs right across many demo frames -- the
 offline check already reports per-joint MSE and did **not** show the left arm
 as anomalous, which points at eval rather than training).
+
+### #2 The winner's policy also no-ops here — the sim observation is the fault (2026-08-11)
+
+Ran the LeHome Challenge 2026 winning policy (Larchenko, 1st of 62, 74.5% on
+long tops) through *our* harness. Getting there required:
+
+* a separate `jaxenv` (JAX 0.5.3 + openpi), **CPU-only torch** so JAX owns the GPU
+* `restore_params(..., dtype=jnp.float32)` and `pi_modified_config.dtype="float32"`
+  — with the shipped `bfloat16` the server dies on GB10 with
+  `Unsupported conversion from bf16 to f16 / LLVM ERROR`, an XLA crash on sm_121
+* `scripts/remote_ws_policy.py` — their `serve.py` speaks a stateless WebSocket
+  `infer_chunk` protocol and expects LeHome's native observation keys, so our env
+  output forwards nearly unchanged (images base64, `next_initial_actions` echoed
+  back as the rolling inpaint anchor). Their served config is
+  **`execute=5`** — re-planning every 5 steps, against our 50.
+
+**Their policy on a real demo frame** (dataset image, episode 0 frame 100):
+
+```
+state       [ 0.227, -1.633,  1.538, ...  -0.123, -0.375, -0.491, ...]
+action[0]   [ 0.154, -1.622,  1.412, ...   0.355, -1.562,  1.297, ...]
+demo action [ 0.150, -1.623,  1.395, ...   0.253, -1.414,  1.185, ...]
+```
+
+Absolute actions (not deltas), reproducing the demonstration to ~3 decimals on
+the left arm. Protocol, units and adapter are all correct.
+
+**Their policy in our simulator:** J 7.35 -> 7.26 -> 7.37, max check-point
+displacement 1.13 cm, `Return=106.41` — the *identical* return produced by the
+no-op control and by our SmolVLA. Its own success head read 0.88-0.95 throughout,
+so the policy believed it was folding.
+
+**Conclusion.** Two independent policies — ours and a competition winner — both
+imitate demonstrations correctly on dataset images and both collapse to a no-op
+on our simulator images. The policy is no longer a plausible common cause. The
+fault is in **what our evaluation feeds the policy**.
+
+This retires the compounding-error explanation from the previous section: a
+policy that scores 74.5% on this benchmark does not drift to a standstill.
+
+Still-unexplained observation difference, and the next thing to pin down: the
+demo top camera shows a flat garment over wide white margins, while our sim
+frame shows the garment filling the view. Earlier I attributed this to my
+brightness threshold and dropped it; with the policy ruled out it is the leading
+candidate and needs a proper same-scale comparison of a dataset frame against a
+sim frame.

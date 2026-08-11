@@ -80,4 +80,10 @@ if __name__ == "__main__":
 
     set_action_horizon.install()
 
+    # Optional external WebSocket policy, controlled by LEHOME_WS. Installed
+    # last so it replaces the registry entry outright.
+    import remote_ws_policy
+
+    remote_ws_policy.install()
+
     main()
