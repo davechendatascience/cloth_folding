@@ -237,3 +237,54 @@ frame shows the garment filling the view. Earlier I attributed this to my
 brightness threshold and dropped it; with the policy ruled out it is the leading
 candidate and needs a proper same-scale comparison of a dataset frame against a
 sim frame.
+
+### #3 Replacing the eval chain does not help — it is the render (2026-08-11)
+
+Cloned the winner's own `lehome-challenge` fork and ran **their** env + eval code,
+against **their** policy, on this machine: `Return=105.53`, no fold. Same failure
+as our chain.
+
+Their fork does contain two things worth taking:
+
+* **`success_checker_garment_fold` is defective in the official repo.** Their
+  comment: its `@step_interval(50)` decorator "returns a literal False on 49 of
+  50 calls and leaks its module-global counter across episodes". They bypass it
+  and call `check_top_sleeve` / `check_pant_*` directly. This explains why our
+  per-episode success checks appeared only ~12-36 times over 600 steps at
+  inconsistent phases, and means a transient success can be missed outright.
+* `apply_camera_overrides` — camera resolution/depth are expected to vary
+  (`LEHOME_TOP_CAMERA_WIDTH`, `LEHOME_NO_DEPTH`).
+
+Their `visual_augmentation.py` is *training-time* domain randomisation for RL
+rollouts (garment recolour, camera pos/rot/focal jitter, dome-light rotation),
+i.e. how their policy tolerates visual variation — not an observation fix. Their
+sim was never broken, so their code contains no repair for ours.
+
+**Elimination table**
+
+| component | verdict |
+|---|---|
+| our eval chain | not the cause — theirs fails identically |
+| their eval chain | not a fix |
+| policy | not the cause — two independent policies, one a 74.5% winner |
+| action plumbing, units, absolute-vs-delta | verified correct |
+| env, physics, success predicate, initial robot pose | verified — replay folds, J 7.27 -> 0.00 |
+| **rendered observation** | **the cause** |
+
+Demo replay succeeds *because* it is open-loop and never reads an image.
+Everything that reads an image fails.
+
+**The visual difference, measured.** Dataset frame 0 vs our sim frame 0, same
+garment, brightness-matched:
+
+* demo: flat spread T-shirt, both sleeves visible, ~40% of frame, wide white margins
+* sim: garment fills the frame, sleeves running off the edges, bunched
+
+roughly 2x larger linearly. Candidate causes, in order: camera FOV/aspect or
+position, garment `scale` (per-garment JSON says 0.45, the common config 0.4),
+or the reset not laying the garment flat.
+
+**Also note:** `scripts/photometric_match.py` fixes brightness but distorts hue —
+bluish-pixel fraction goes 41.3% raw -> 11.0% matched and the denim renders
+violet. Per-channel mean/std matching is the wrong transform; match luminance
+only, or fix the renderer instead.
