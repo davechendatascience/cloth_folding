@@ -144,7 +144,6 @@ rather than treating all conditions equally (`GarmentFunctionalCfg.weights`).
 
 ## Measured joint damping
 
-`scripts/measure_joint_damping.py`, step response at q=0, K=17.8, D=0.60:
 
 | joint | overshoot | ζ | ω_n | J (kg·m²) | D_crit | settle |
 |---|---|---|---|---|---|---|
@@ -216,7 +215,6 @@ This also refutes action chunking as a fix: proprio still predicts at R² 0.725
 across 80 steps, so there is no chunkable horizon where the shortcut dies.
 
 **What the diagnostics actually show.** Perturbing each input and measuring
-`|Δaction|` (`scripts/measure_attribution.py`):
 
 ```
 proprio influence : 0.5969     <- dominates
@@ -370,3 +368,25 @@ scripts/
 
 The package is symlinked into `lehome-challenge/source/lehome/lehome/` so it
 imports as `lehome.real_damped_project`, matching the spec's intended layout.
+
+## Current scripts
+
+Evaluation runs through LeHome's own `scripts.eval`; `lehome_eval.py` only fixes
+process start-up and installs optional shims (see `docs/pipeline_defects.md`).
+
+| script | purpose |
+|---|---|
+| `run_lehome_eval.sh` | launch the official eval with the environment Isaac needs |
+| `lehome_eval.py` | launcher + shim host (`fork` start method, then optional shims) |
+| `lehome_replay.py` | same, for `dataset_sim.py` record/replay |
+| `fix_success_checker.py` | repairs `@step_interval(50)`, which returned `False` on 49/50 calls with a counter that never reset |
+| `offline_action_check.py` | **the reusable metric** — scores a checkpoint's imitation quality against a persistence baseline in ~2 min, no simulator |
+| `grade_eval.py` | graded fold quality (J) from an eval log, Seen/Unseen split |
+| `grasp_sweep.py` | Phase A: can friction-only grasping hold cloth? (answer so far: contact yes, hold no) |
+| `probe_*.py` | diagnostics — camera geometry, projection, cloth sources, gripper reach |
+| `replay_policy.py` | plays recorded actions through the eval, for rendering ground truth |
+| `remote_ws_policy.py` | drives an external WebSocket policy server |
+| `photometric_match.py`, `shift_top_camera.py`, `ablate_vision.py`, `set_action_horizon.py`, `log_*.py` | optional eval shims, each env-var gated |
+
+Shims are opt-in via environment variables and are no-ops when unset, so the
+default path is LeHome's unmodified evaluation.
